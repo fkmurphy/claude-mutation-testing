@@ -1,0 +1,9 @@
+{
+  "name": "mutation",
+  "version": "0.1.0",
+  "description": "Mutation testing with Stryker for Node/TypeScript services: a script that runs everything and an agent that triages the survivors",
+  "author": {
+    "name": "Julian Murphy"
+  },
+  "repository": "https://github.com/fkmurphy/claude-mutation-testing"
+}
