@@ -22,6 +22,8 @@ ${CLAUDE_SKILL_DIR}/scripts/mutate.sh <back-dir> <out-dir> <file>...
 
 Prints `summary.json` to stdout and leaves it in `<out-dir>`, next to `mutation.json` (the full report, used for probing) and the logs.
 
+If another jest is running on the machine, the script prints `LOAD_WARNING` and `summary.json` carries it in `warnings`: runtimes and timeouts are inflated. Say so in the output.
+
 | Exit code | Meaning | What to do |
 |---|---|---|
 | 0 | ran | triage |

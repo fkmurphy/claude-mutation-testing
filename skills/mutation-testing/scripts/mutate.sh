@@ -124,6 +124,26 @@ module.exports = {
 };
 JS
 
+export TZ=Etc/UTC
+
+# Precondition: the suite covering these files passes unmutated. With a red or flaky
+# baseline, every mutant counts as killed and the result is noise.
+# Another jest on the machine steals CPU: tests run slower, more mutants time out, and the
+# run takes longer. Nothing to fix here, but the result has to say it.
+: > "$OUT_DIR/warnings.txt"
+OTHER_JEST="$(pgrep -f "jest/bin/jest|jest-worker" | tr '\n' ' ')"
+if [ -n "$OTHER_JEST" ]; then
+  echo "LOAD_WARNING: another jest is running (pids $OTHER_JEST). Timeouts and runtime will be inflated." | tee -a "$OUT_DIR/warnings.txt" >&2
+fi
+
+echo "baseline of the related tests..." >&2
+if ! node_modules/.bin/jest -c "$WORK_DIR/jest.config.cjs" --findRelatedTests "${SOURCE_FILES[@]}" \
+    --passWithNoTests --silent >"$OUT_DIR/baseline.log" 2>&1; then
+  echo "RED_BASELINE: the related tests fail without any mutation. Nothing Stryker says is valid." >&2
+  grep -E "✕|●|Tests:" "$OUT_DIR/baseline.log" | head -30 >&2
+  exit 3
+fi
+
 node - "$WORK_DIR/stryker.config.json" "$OUT_DIR/mutation.json" "$TYPECHECK" "${MUTATE_CONCURRENCY:-4}" "${MUTATE_REUSE:-20}" "${FILES[@]}" <<'JS'
 const { writeFileSync } = require("node:fs");
 const [configPath, reportPath, typecheck, concurrency, reuse, ...files] = process.argv.slice(2);
@@ -150,18 +170,6 @@ const config = {
 };
 writeFileSync(configPath, JSON.stringify(config, null, 2));
 JS
-
-export TZ=Etc/UTC
-
-# Precondition: the suite covering these files passes unmutated. With a red or flaky
-# baseline, every mutant counts as killed and the result is noise.
-echo "baseline of the related tests..." >&2
-if ! node_modules/.bin/jest -c "$WORK_DIR/jest.config.cjs" --findRelatedTests "${SOURCE_FILES[@]}" \
-    --passWithNoTests --silent >"$OUT_DIR/baseline.log" 2>&1; then
-  echo "RED_BASELINE: the related tests fail without any mutation. Nothing Stryker says is valid." >&2
-  grep -E "✕|●|Tests:" "$OUT_DIR/baseline.log" | head -30 >&2
-  exit 3
-fi
 
 echo "running Stryker on ${#FILES[@]} file(s)..." >&2
 START=$(date +%s)
@@ -198,4 +206,4 @@ if [ -s "$OUT_DIR/timeouts.tsv" ]; then
   done < "$OUT_DIR/timeouts.tsv"
 fi
 
-node "$SKILL_DIR/scripts/reduce.mjs" "$OUT_DIR/mutation.json" "$OUT_DIR/recheck.tsv" | tee "$OUT_DIR/summary.json"
+node "$SKILL_DIR/scripts/reduce.mjs" "$OUT_DIR/mutation.json" "$OUT_DIR/recheck.tsv" "$OUT_DIR/warnings.txt" | tee "$OUT_DIR/summary.json"

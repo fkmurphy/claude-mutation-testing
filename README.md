@@ -11,6 +11,16 @@ real gaps are left.
 - **Agent `mutant-triager`** — preloads the skill, runs the script first and triages every
   survivor into `gap`, `bug`, `equivalent`, `killed-by-integration`, `noise` or `unclear`.
 
+- **`scripts/affected-tests.mjs` (experimental, not used by the agent yet)** — finds the tests
+  that reach the given lines without running anything: walks references upward with the
+  project's own TypeScript language service, follows Express routes (hand-written routers and
+  generated ones such as tsoa's) to the tests that call their URL, and reports where the static
+  walk stops (queue workers, shared base methods).
+
+  ```bash
+  node skills/mutation-testing/scripts/affected-tests.mjs <back-dir> <file>[:<from>-<to>] [...]
+  ```
+
 ## Assumptions
 
 - A service directory with `package.json`, `jest.config.js` and pnpm.
