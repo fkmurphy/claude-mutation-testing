@@ -6,7 +6,7 @@ const MAX_DEPTH = 8;
 const OPERATORS = new Set(["&&", "||", ";", "|"]);
 const PACKAGE_MANAGERS = new Set(["pnpm", "npm", "yarn"]);
 const ENV_ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s;
-const ARRAY_FLAGS = new Set(["testPathIgnorePatterns", "setupFilesAfterEnv"]);
+const ARRAY_FLAGS = new Set(["testPathIgnorePatterns", "setupFilesAfterEnv", "testMatch"]);
 const VALUE_FLAGS = new Set(["config"]);
 const FLAG_ALIASES = { c: "config" };
 
@@ -92,7 +92,7 @@ const camelCase = (name) => name.replace(/-([a-z])/g, (_, letter) => letter.toUp
 
 // Mirrors jest's own CLI: an array flag takes every following value until the next flag.
 export const readJestFlags = (args) => {
-  const flags = { testPathIgnorePatterns: [], setupFilesAfterEnv: [], config: null };
+  const flags = { testPathIgnorePatterns: [], setupFilesAfterEnv: [], testMatch: [], config: null };
   const assign = (name, values) => {
     if (ARRAY_FLAGS.has(name)) flags[name].push(...values);
     if (VALUE_FLAGS.has(name) && values.length > 0) flags[name] = values[0];
@@ -111,5 +111,6 @@ export const readJestFlags = (args) => {
     ...flags,
     testPathIgnorePatterns: [...new Set(flags.testPathIgnorePatterns)],
     setupFilesAfterEnv: [...new Set(flags.setupFilesAfterEnv)],
+    testMatch: [...new Set(flags.testMatch)],
   };
 };

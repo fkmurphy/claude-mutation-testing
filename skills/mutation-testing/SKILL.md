@@ -19,6 +19,7 @@ ${CLAUDE_SKILL_DIR}/scripts/mutate.sh <back-dir> <out-dir> <file>...
 - `<out-dir>`: outside the repo, e.g. the session scratchpad.
 - `<file>`: paths relative to `<back-dir>`. Code, never tests. Accepts a range to narrow it to what changed: `src/lib/orders/Order.ts:120-180`. In a review, the diff's range.
 - `--typecheck`: discards mutants TypeScript would reject. Slower.
+- `--integration`: after the unit stage, an integration stage settles what it left alive. See below. Use it when `<back-dir>/.mutation.json` has an `integration.database`; without one the stage runs on a single runner, which is correct but slow.
 
 Prints `summary.json` to stdout and leaves it in `<out-dir>`, next to `mutation.json` (the full report, used for probing) and the logs. `summary.json` carries under `config` the effective settings and where each one came from: the repo's unit test script, a default, or the repo's `.mutation.json`. Most come from the unit script (`test-unit`, `test:unit` or `unit`), followed through its `pnpm run`/`npm run`/`yarn` references down to the jest call: its `--testPathIgnorePatterns`, its `--setupFilesAfterEnv`, its `--config` and the variables in front of it (`TZ=UTC jest`). If a value looks wrong, the fix is a `.mutation.json` in `<back-dir>`, not a different command.
 
@@ -26,6 +27,8 @@ Everything in `warnings` goes in the output:
 
 - `LOAD_WARNING`: another jest is running on the machine. Runtimes and timeouts are inflated.
 - `RECHECK_INCONCLUSIVE`: a timeout could not be rechecked (`ERROR` or `TIMEOUT` from the probe). It stays counted as detected, so it may hide a survivor.
+- `INTEGRATION_SKIPPED`, `INTEGRATION_NO_TESTS`, `INTEGRATION_BASELINE_RED`, `INTEGRATION_FAILED`: the integration stage did not run or did not finish, and the message says why. The unit result stands. Survivors are then settled by probing, as without `--integration`.
+- `SELECTOR_INCOMPLETE`: the static walk that picks the integration tests stopped somewhere (a method many classes share, a reference at module level). Tests reached only through there did not run, so a survivor of both stages may still die in one of them: probe before calling it a `gap`.
 - `BASELINE_WIDENED`: no test is related to the files by imports, usually because the jest `roots` leave the source out, so the precondition ran the whole unit suite. The result is still valid; runs are slower.
 
 | Exit code | Meaning | What to do |
@@ -44,7 +47,8 @@ No need to discard these again:
 
 - **Logs.** By default, the log-level methods (`info`, `warn`, `error`, `debug`, `trace`, `fatal`, `child`) called on any name ending in `logger` (`logger`, `baseLogger`, `this.logger`, `getLogger()`, `x.child(...)`), plus `console.*`, and the statement that contains them. Instrumentation is not business logic. The repo can add or replace patterns: the effective list is `config.effective.ignoreCalls`. A method that is not a log level (`auditLogger.record(...)`) is mutated.
 - **Static code.** Code that only runs when the module loads (`ignoreStatic`). A chosen blind spot: module-level config is not measured.
-- **Integration.** Nothing is mutated against integration: the script excludes the test paths the unit script excludes (`config.effective.unitTestIgnorePatterns`; without a unit script, `/integration/` and `/e2e/`). Each mutant would cost seconds of database. It is used to settle survivors, below.
+- **Integration, in the unit stage.** The unit stage excludes the test paths the unit script excludes (`config.effective.unitTestIgnorePatterns`; without a unit script, `/integration/` and `/e2e/`). Each mutant would cost seconds of database there.
+- **What integration kills, with `--integration`.** The integration stage takes only what the unit stage left alive (survivors and NoCoverage), mutates exactly those positions again, and runs the integration tests that reach their lines (found by `affected-tests.mjs`, not by imports). Every Stryker runner is a shard with its own database, copied from `integration.database.template`, so tests that clean tables never wipe each other's data. What it kills is in `killedByIntegration`, with the test that killed it: those are already settled, list them as `killed-by-integration` without probing. A survivor with `integration.status: "Survived"` survived both stages, so it is the strongest gap candidate. With `"NoCoverage"` no integration test reaches it either.
 - **Timeouts under load.** Stryker counts a timeout as detected, and with several runners in parallel a slow test runs out of time without the mutant having broken it: at concurrency 6, 58 of 67 mutants "died" that way and only 2 of 13 survivors were left. The script reruns each timeout alone, with no load, and the one that passes goes back to the list with `revivedFromTimeout: true`. `Hit limit reached` ones are real infinite loops and stay as detected.
 
 ## Triage each survivor
@@ -58,7 +62,7 @@ There is one question: **is there a realistic input, allowed by the contract, th
 | `gap` | An input tells them apart, and no test uses it | **the concrete input** and the test where it belongs |
 | `bug` | The mutant behaves better than the original | the case where the original fails |
 | `equivalent` | No allowed input tells them apart | **why**: which layer or which semantics absorbs it |
-| `killed-by-integration` | An integration test kills it (probed) | the test that kills it |
+| `killed-by-integration` | An integration test kills it (from `killedByIntegration`, or probed) | the test that kills it |
 | `noise` | Changes something observable that is not contract | why it is not contract |
 | `unclear` | Reading and cheap probing were not enough | what is missing to decide |
 
@@ -95,7 +99,7 @@ Exit 1 means the file could not be restored: stop and restore it with `git check
 
 `ERROR` and `TIMEOUT` are never a verdict on the survivor. Fix the cause (for example, start the database) and probe again, or leave the survivor `unclear` with the reason.
 
-- **Before declaring a `gap` in a file that has integration tests**, probe with the integration test, through the script the repo uses to run one integration file (read `package.json`), e.g. `-- npm run test:integration -- <path/to/file.test.ts>`. It needs whatever the integration suite needs locally, usually a database. In the measured reference, one of the two permission-check candidates died here.
+- **Before declaring a `gap` in a file that has integration tests**, unless the integration stage already ran it (`integration.status: "Survived"` without `SELECTOR_INCOMPLETE`), probe with the integration test, through the script the repo uses to run one integration file (read `package.json`), e.g. `-- npm run test:integration -- <path/to/file.test.ts>`. It needs whatever the integration suite needs locally, usually a database. In the measured reference, one of the two permission-check candidates died here.
 - **To confirm a `gap`**, the strongest move is writing the test with the distinguishing input in a temporary file and probing with it: if it fails with the mutant and passes without it, the gap is proven. Delete the file afterwards.
 
 ### The central warning
@@ -132,6 +136,6 @@ If there are no gaps, say so on the first line.
 
 ## Limits
 
-- **Unit tests only.** A service whose logic is tested through integration comes out almost entirely `noCoverage`.
+- **Without `--integration`, unit tests only.** A service whose logic is tested through integration comes out almost entirely `noCoverage`; `--integration` is the way to measure it.
 - **Equivalent mutants cannot be marked.** Stryker has no way to remember them: they come back on the next run. That is why triage explains them in one line, so the second time is reading, not thinking.
 - **Mutation does not see a badly designed algorithm.** It perturbs the code that was written; it does not propose the code that was missing. 27% of real faults couple with no mutant (Just et al., 2014).

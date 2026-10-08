@@ -79,6 +79,63 @@ const enclosingFunctionLike = (node) => {
   return undefined;
 };
 
+const isModuleExports = (node) =>
+  (ts.isIdentifier(node) && node.text === "exports") ||
+  (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "module" && node.name.text === "exports");
+
+// A CommonJS export of a reference: `module.exports = { fn }`, `{ name: fn }`, `exports.name = fn`.
+// Returns the exported name, whose references are the require() sites; ES exports need no hop
+// because the language service already follows import aliases.
+const commonJsExportName = (node) => {
+  const { parent } = node;
+  if (!parent) return undefined;
+  const assignedObject = (objectLiteral) =>
+    ts.isObjectLiteralExpression(objectLiteral) &&
+    ts.isBinaryExpression(objectLiteral.parent) &&
+    objectLiteral.parent.right === objectLiteral &&
+    isModuleExports(objectLiteral.parent.left);
+  if (ts.isShorthandPropertyAssignment(parent) && assignedObject(parent.parent)) return parent.name;
+  if (ts.isPropertyAssignment(parent) && parent.initializer === node && assignedObject(parent.parent)) return parent.name;
+  if (ts.isBinaryExpression(parent) && parent.right === node && ts.isPropertyAccessExpression(parent.left) && isModuleExports(parent.left.expression)) {
+    return parent.left.name;
+  }
+  return undefined;
+};
+
+const resolvesTo = (specifier, containingFile, target) =>
+  ts.resolveModuleName(specifier, containingFile, parsed.options, ts.sys).resolvedModule?.resolvedFileName === target;
+
+// The local names a CommonJS export is bound to: `const { name } = require("./x")` and
+// `const { name: alias } = require("./x")`. `const x = require("./x")` followed by `x.name` is not
+// followed: it surfaces as a missing test, never as a wrong one.
+const requireSites = (exportingFile, exportName) =>
+  program
+    .getSourceFiles()
+    .filter((sourceFile) => !sourceFile.fileName.includes("node_modules"))
+    .flatMap((sourceFile) => {
+      const found = [];
+      const visit = (node) => {
+        if (
+          ts.isVariableDeclaration(node) &&
+          node.initializer &&
+          ts.isCallExpression(node.initializer) &&
+          ts.isIdentifier(node.initializer.expression) &&
+          node.initializer.expression.text === "require" &&
+          node.initializer.arguments[0] &&
+          ts.isStringLiteral(node.initializer.arguments[0]) &&
+          ts.isObjectBindingPattern(node.name) &&
+          resolvesTo(node.initializer.arguments[0].text, sourceFile.fileName, exportingFile)
+        ) {
+          node.name.elements
+            .filter((element) => (element.propertyName ?? element.name).getText(sourceFile) === exportName && ts.isIdentifier(element.name))
+            .forEach((element) => found.push({ sourceFile, nameNode: element.name }));
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(sourceFile);
+      return found;
+    });
+
 const describe = (sourceFile, declaration) => {
   const name = nameOfFunctionLike(declaration);
   const owner = declaration.parent && ts.isClassLike(declaration.parent) && declaration.parent.name ? `${declaration.parent.name.text}.` : "";
@@ -101,6 +158,47 @@ const routeAround = (sourceFile, node) => {
   return undefined;
 };
 
+// `<router>.use(middleware)` or `<router>.use("/prefix", middleware)` around a reference: the
+// middleware runs for every route of that router.
+const middlewareMountAround = (node) => {
+  const call = node.parent;
+  if (!call || !ts.isCallExpression(call) || !call.arguments.includes(node)) return undefined;
+  if (!ts.isPropertyAccessExpression(call.expression) || call.expression.name.text !== "use" || !ts.isIdentifier(call.expression.expression)) return undefined;
+  return { router: call.expression.expression, prefix: pathLiteral(call.arguments[0]) ?? "" };
+};
+
+// The routes declared on a router in its own file: `<router>.<method>("/path", ...)`.
+const routesOf = (sourceFile, router) => {
+  const found = [];
+  const visit = (node) => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      ts.isIdentifier(node.expression.expression) &&
+      node.expression.expression.text === router.text &&
+      HTTP_METHODS.has(node.expression.name.text.toLowerCase()) &&
+      pathLiteral(node.arguments[0])
+    ) {
+      found.push({ method: node.expression.name.text.toLowerCase(), path: pathLiteral(node.arguments[0]) });
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return found;
+};
+
+// The decorator a reference sits in, e.g. tsoa's `@Middlewares([guard])`: the decorated method,
+// or every method of the decorated class, is where the walk goes on.
+const decoratedTargets = (node) => {
+  let current = node.parent;
+  while (current && !ts.isSourceFile(current) && !ts.isDecorator(current)) current = current.parent;
+  if (!current || !ts.isDecorator(current)) return undefined;
+  const decorated = current.parent;
+  if (ts.isMethodDeclaration(decorated)) return [decorated];
+  if (ts.isClassDeclaration(decorated)) return decorated.members.filter((member) => ts.isMethodDeclaration(member) && member.name);
+  return undefined;
+};
+
 // Prefixes a router is mounted under, through `<parent>.use("/prefix", ..., router)`.
 const mountPrefixes = (sourceFile, routerExpression, depth = 0) => {
   if (depth > 5 || !ts.isIdentifier(routerExpression)) return [""];
@@ -108,9 +206,14 @@ const mountPrefixes = (sourceFile, routerExpression, depth = 0) => {
   const prefixes = references.flatMap(({ references: entries }) =>
     entries.flatMap((entry) => {
       const file = program.getSourceFile(entry.fileName);
-      let current = deepestNodeAt(file, entry.textSpan.start).parent;
+      const reference = deepestNodeAt(file, entry.textSpan.start);
+      let current = reference.parent;
       while (current && !ts.isSourceFile(current)) {
-        if (ts.isCallExpression(current) && ts.isPropertyAccessExpression(current.expression) && current.expression.name.text === "use") {
+        // Only `<parent>.use("/prefix", router)` mounts it: in `router.use(...)` the router is the
+        // one mounting something else.
+        const mountsReference =
+          ts.isCallExpression(current) && current.arguments.some((argument) => argument.pos <= reference.pos && reference.end <= argument.end);
+        if (mountsReference && ts.isPropertyAccessExpression(current.expression) && current.expression.name.text === "use") {
           const prefix = pathLiteral(current.arguments[0]);
           if (prefix === undefined) return [];
           return mountPrefixes(file, current.expression.expression, depth + 1).map((outer) => `${outer}${prefix}`);
@@ -179,7 +282,20 @@ const routes = [];
 const roots = [];
 const hubs = [];
 const visited = new Set();
-const queue = [...starts.values()].map(({ sourceFile, declaration }) => ({ sourceFile, declaration, chain: [describe(sourceFile, declaration)] }));
+const followRoute = (sourceFile, router, method, routePath, chain) =>
+  mountPrefixes(sourceFile, router).forEach((prefix) => {
+    const fullPath = `${prefix}${routePath}`.replace(/\/+/g, "/");
+    const routeSegments = segments(fullPath);
+    const callers = testCalls.filter((call) => call.method === method && sameRoute(call.segments, routeSegments));
+    routes.push({ method: method.toUpperCase(), path: fullPath, tests: [...new Set(callers.map((call) => relative(call.file)))].length, chain });
+    callers.forEach((call) => addTest(call.file, "http", [...chain, `${method.toUpperCase()} ${fullPath}`]));
+  });
+
+const queue = [...starts.values()].map(({ sourceFile, declaration }) => ({
+  sourceFile,
+  nameNode: nameOfFunctionLike(declaration),
+  chain: [describe(sourceFile, declaration)],
+}));
 
 const addTest = (file, kind, chain) => {
   const key = relative(file);
@@ -187,8 +303,7 @@ const addTest = (file, kind, chain) => {
 };
 
 while (queue.length > 0 && visited.size < MAX_NODES) {
-  const { sourceFile, declaration, chain } = queue.shift();
-  const nameNode = nameOfFunctionLike(declaration);
+  const { sourceFile, nameNode, chain } = queue.shift();
   const key = `${sourceFile.fileName}:${nameNode.getStart(sourceFile)}`;
   if (visited.has(key)) continue;
   visited.add(key);
@@ -208,19 +323,33 @@ while (queue.length > 0 && visited.size < MAX_NODES) {
     if (isTestFile(entry.fileName)) return addTest(entry.fileName, "direct", chain);
 
     const route = routeAround(file, node);
-    if (route) {
-      mountPrefixes(route.sourceFile, route.router).forEach((prefix) => {
-        const fullPath = `${prefix}${route.path}`.replace(/\/+/g, "/");
-        const routeSegments = segments(fullPath);
-        const callers = testCalls.filter((call) => call.method === route.method && sameRoute(call.segments, routeSegments));
-        routes.push({ method: route.method.toUpperCase(), path: fullPath, tests: [...new Set(callers.map((call) => relative(call.file)))].length, chain });
-        callers.forEach((call) => addTest(call.file, "http", [...chain, `${route.method.toUpperCase()} ${fullPath}`]));
-      });
-      return;
+    if (route) return followRoute(route.sourceFile, route.router, route.method, route.path, chain);
+
+    const mount = middlewareMountAround(node);
+    if (mount) {
+      const mounted = routesOf(file, mount.router);
+      if (mounted.length > 0) {
+        const step = `${relative(entry.fileName)}:${lineOf(file, entry.textSpan.start)} ${mount.router.text}.use(${node.getText(file)})`;
+        return mounted.forEach(({ method, path: routePath }) => followRoute(file, mount.router, method, `${mount.prefix}${routePath}`, [...chain, step]));
+      }
     }
 
+    const targets = decoratedTargets(node);
+    if (targets) {
+      return targets.forEach((method) => queue.push({ sourceFile: file, nameNode: method.name, chain: [...chain, describe(file, method)] }));
+    }
+
+    const exported = commonJsExportName(node);
+    if (exported) {
+      const hop = `${relative(entry.fileName)}:${lineOf(file, exported.getStart(file))} module.exports.${exported.text}`;
+      return requireSites(entry.fileName, exported.text).forEach(({ sourceFile: requirer, nameNode: binding }) => {
+        const step = `${relative(requirer.fileName)}:${lineOf(requirer, binding.getStart(requirer))} require → ${binding.text}`;
+        if (isTestFile(requirer.fileName)) return addTest(requirer.fileName, "direct", [...chain, hop, step]);
+        queue.push({ sourceFile: requirer, nameNode: binding, chain: [...chain, hop, step] });
+      });
+    }
     const caller = enclosingFunctionLike(node);
-    if (caller) return queue.push({ sourceFile: file, declaration: caller, chain: [...chain, describe(file, caller)] });
+    if (caller) return queue.push({ sourceFile: file, nameNode: nameOfFunctionLike(caller), chain: [...chain, describe(file, caller)] });
     roots.push({ at: `${relative(entry.fileName)}:${lineOf(file, entry.textSpan.start)}`, code: node.parent.getText(file).slice(0, 120), chain });
   });
 }

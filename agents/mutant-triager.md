@@ -16,13 +16,13 @@ If `${CLAUDE_SKILL_DIR}` reached you unsubstituted, the scripts live at:
 node -e 'const p = require(require("os").homedir() + "/.claude/plugins/installed_plugins.json").plugins; const i = Object.entries(p).filter(([k]) => k.startsWith("mutation@")).flatMap(([, v]) => v).sort((a, b) => (b.lastUpdated ?? "").localeCompare(a.lastUpdated ?? ""))[0]; console.log(i.installPath + "/skills/mutation-testing/scripts")'
 ```
 
-What you receive: the `<back-dir>` and the files to mutate. If you were not given an output directory, use a temporary one outside the repo. If the repo is not a throwaway worktree and the files to mutate have uncommitted changes, say so and do not probe: `probe.mjs` restores the file, but an interruption halfway leaves it mutated.
+What you receive: the `<back-dir>` and the files to mutate. If `<back-dir>/.mutation.json` has an `integration.database`, add `--integration`: the run settles survivors against the integration suite itself, with one database per runner, and you probe much less. If you were not given an output directory, use a temporary one outside the repo. If the repo is not a throwaway worktree and the files to mutate have uncommitted changes, say so and do not probe: `probe.mjs` restores the file, but an interruption halfway leaves it mutated.
 
 After running:
 
 1. If the exit code is not 0, report it and stop. With a red baseline there is nothing to triage.
 2. Triage **every** survivor with the skill's rules. The effort goes here: the goal is that whoever called you does not have to review any test themselves and gets no false positives. A `gap` without a concrete input is not a gap. An `equivalent` without a reason is not a discard.
-3. Probe what reading does not settle, with `probe.mjs`. Before declaring a `gap` in a file with integration tests, probe with the integration test.
+3. Probe what reading does not settle, with `probe.mjs`. Before declaring a `gap` in a file with integration tests, probe with the integration test, unless the integration stage already ran it on that survivor.
 4. Return the skill's output block. Nothing before, nothing after.
 
 Rules:

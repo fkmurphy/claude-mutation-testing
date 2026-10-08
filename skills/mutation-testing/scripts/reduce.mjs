@@ -1,7 +1,9 @@
 // Reduces Stryker's mutation.json to what needs triage: survivors with their context,
-// NoCoverage grouped by file, and kills suspected to come from a flaky suite.
-// Usage: node reduce.mjs <mutation.json> [recheck.tsv] [warnings.txt] [config.json]
+// NoCoverage grouped by file, and kills suspected to come from a flaky suite. With the
+// integration stage's directory, mutants it killed leave the survivors for killedByIntegration.
+// Usage: node reduce.mjs <mutation.json> [recheck.tsv] [warnings.txt] [config.json] [integration-dir]
 //   recheck.tsv: id<TAB>KILLED|SURVIVED|ERROR|TIMEOUT for the timeouts rerun with no load
+//   integration-dir: mutation.json and recheck.tsv of the integration stage
 import { existsSync, readFileSync } from "node:fs";
 
 const SUSPICIOUS_KILL = /Exceeded timeout|ECONNREFUSED|ECONNRESET|socket hang up|Cannot log after tests are done|SIGSEGV|out of memory/i;
@@ -12,24 +14,60 @@ const recheckPath = process.argv[3];
 const warningsPath = process.argv[4];
 const configPath = process.argv[5];
 const configuration = configPath && existsSync(configPath) ? JSON.parse(readFileSync(configPath, "utf8")) : undefined;
+const integrationDir = process.argv[6];
 const warnings = warningsPath && existsSync(warningsPath) ? readFileSync(warningsPath, "utf8").split("\n").filter(Boolean) : [];
-const recheck = new Map(
-  recheckPath && existsSync(recheckPath)
-    ? readFileSync(recheckPath, "utf8")
-        .split("\n")
-        .filter(Boolean)
-        .map((line) => line.split("\t"))
-    : [],
-);
+const readRecheck = (file) =>
+  new Map(
+    file && existsSync(file)
+      ? readFileSync(file, "utf8")
+          .split("\n")
+          .filter(Boolean)
+          .map((line) => line.split("\t"))
+      : [],
+  );
+const recheck = readRecheck(recheckPath);
 // A timeout that survives with no load was a hidden survivor.
-const effectiveStatus = (mutant) =>
-  mutant.status === "Timeout" && recheck.get(String(mutant.id)) === "SURVIVED" ? "Survived" : mutant.status;
+const statusAfterRecheck = (mutant, rechecked) =>
+  mutant.status === "Timeout" && rechecked.get(String(mutant.id)) === "SURVIVED" ? "Survived" : mutant.status;
+const effectiveStatus = (mutant) => statusAfterRecheck(mutant, recheck);
 
-const testsById = new Map(
-  Object.entries(report.testFiles ?? {}).flatMap(([testFile, { tests }]) =>
-    tests.map((test) => [test.id, { file: testFile, name: test.name }]),
-  ),
-);
+const testsOf = (stageReport) =>
+  new Map(
+    Object.entries(stageReport.testFiles ?? {}).flatMap(([testFile, { tests }]) =>
+      tests.map((test) => [test.id, { file: testFile, name: test.name }]),
+    ),
+  );
+const testsById = testsOf(report);
+const testNames = (ids, byId) =>
+  (ids ?? [])
+    .slice(0, MAX_TESTS_PER_MUTANT)
+    .map((testId) => byId.get(testId))
+    .filter(Boolean)
+    .map(({ file, name }) => `${file} › ${name}`);
+
+// The same mutant in both stages: the ids differ, the position and the change do not.
+const mutantKey = (file, mutant) =>
+  [file, mutant.location.start.line, mutant.location.start.column, mutant.location.end.line, mutant.location.end.column, mutant.mutatorName, mutant.replacement].join("|");
+
+const integrationReportPath = integrationDir && `${integrationDir}/mutation.json`;
+const integrationRan = Boolean(integrationReportPath && existsSync(integrationReportPath));
+const integrationTargets =
+  integrationDir && existsSync(`${integrationDir}/targets.json`) ? JSON.parse(readFileSync(`${integrationDir}/targets.json`, "utf8")).length : 0;
+const integrationResults = (() => {
+  if (!integrationRan) return new Map();
+  const stageReport = JSON.parse(readFileSync(integrationReportPath, "utf8"));
+  const stageRecheck = readRecheck(`${integrationDir}/recheck.tsv`);
+  const byId = testsOf(stageReport);
+  return new Map(
+    Object.entries(stageReport.files).flatMap(([file, { mutants: stageMutants }]) =>
+      stageMutants.map((mutant) => {
+        const status = statusAfterRecheck(mutant, stageRecheck);
+        return [mutantKey(file, mutant), { status, killedBy: testNames(mutant.killedBy, byId), coveredBy: testNames(mutant.coveredBy, byId) }];
+      }),
+    ),
+  );
+})();
+const KILLED_STATUSES = new Set(["Killed", "Timeout"]);
 
 const sliceSource = (lines, { start, end }) =>
   start.line === end.line
@@ -52,6 +90,7 @@ const mutants = Object.entries(report.files).flatMap(([file, { source, mutants: 
     line: mutant.location.start.line,
     lineText: lines[mutant.location.start.line - 1].trim(),
     original: sliceSource(lines, mutant.location),
+    integration: integrationResults.get(mutantKey(file, mutant)),
   }));
 });
 
@@ -63,8 +102,12 @@ const noCoverage = countBy("NoCoverage");
 const detected = killed + timeout;
 const percent = (numerator, denominator) => (denominator === 0 ? null : Math.round((numerator / denominator) * 10000) / 100);
 
+const killedInIntegration = (mutant) => KILLED_STATUSES.has(mutant.integration?.status);
+const isSurvivor = (mutant) =>
+  (mutant.status === "Survived" && !killedInIntegration(mutant)) || (mutant.status === "NoCoverage" && mutant.integration?.status === "Survived");
+
 const survivors = mutants
-  .filter((mutant) => mutant.status === "Survived")
+  .filter(isSurvivor)
   .map((mutant) => ({
     id: mutant.id,
     file: mutant.file,
@@ -80,11 +123,27 @@ const survivors = mutants
       .map(({ file, name }) => `${file} › ${name}`),
     coveredByCount: (mutant.coveredBy ?? []).length,
     ...(mutant.revivedFromTimeout ? { revivedFromTimeout: true } : {}),
+    ...(mutant.integration
+      ? { integration: { status: mutant.integration.status, coveredBy: mutant.integration.coveredBy }, ...(mutant.status === "NoCoverage" ? { unitStatus: "NoCoverage" } : {}) }
+      : {}),
+  }));
+
+const killedByIntegration = mutants
+  .filter((mutant) => (mutant.status === "Survived" || mutant.status === "NoCoverage") && killedInIntegration(mutant))
+  .map((mutant) => ({
+    id: mutant.id,
+    file: mutant.file,
+    line: mutant.line,
+    mutator: mutant.mutatorName,
+    original: truncate(mutant.original),
+    replacement: truncate(mutant.replacement ?? ""),
+    unitStatus: mutant.status,
+    killedBy: mutant.integration.killedBy,
   }));
 
 const noCoverageByFile = Object.values(
   mutants
-    .filter((mutant) => mutant.status === "NoCoverage")
+    .filter((mutant) => mutant.status === "NoCoverage" && !killedInIntegration(mutant) && mutant.integration?.status !== "Survived")
     .reduce((groups, mutant) => {
       const group = groups[mutant.file] ?? { file: mutant.file, count: 0, lines: new Set() };
       group.count += 1;
@@ -122,10 +181,22 @@ console.log(
         timeoutsRechecked: recheck.size,
         timeoutsRevived: mutants.filter((mutant) => mutant.revivedFromTimeout).length,
         timeoutsInconclusive: [...recheck.values()].filter((verdict) => verdict !== "KILLED" && verdict !== "SURVIVED").length,
+        ...(integrationDir
+          ? {
+              integration: {
+                ran: integrationRan,
+                targets: integrationTargets,
+                killed: killedByIntegration.length,
+                survived: survivors.filter((survivor) => survivor.integration?.status === "Survived").length,
+              },
+              scoreWithIntegration: percent(detected + killedByIntegration.length, detected + survived + noCoverage),
+            }
+          : {}),
       },
       warnings,
       ...(configuration ? { config: { effective: configuration.effective, sources: configuration.sources } } : {}),
       survivors,
+      ...(integrationDir ? { killedByIntegration } : {}),
       noCoverage: noCoverageByFile,
       suspiciousKills,
     },

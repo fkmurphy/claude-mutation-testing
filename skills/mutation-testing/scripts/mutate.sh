@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Runs Stryker on specific files of a Node/TypeScript service and leaves a reduced result.
 #
-# Usage: mutate.sh <back-dir> <out-dir> [--typecheck] <file> [<file>...]
+# Usage: mutate.sh <back-dir> <out-dir> [--typecheck] [--integration] <file> [<file>...]
 #   <back-dir>    the service directory, the one with package.json
 #   <out-dir>     where stryker.log, mutation.json and summary.json end up (outside the repo)
 #   <file>        paths relative to <back-dir>, e.g. src/lib/orders/Order.ts. Accepts a
 #                 line range to narrow it down: src/lib/orders/Order.ts:120-180
 #   --typecheck   discards the mutants TypeScript would reject (slower)
+#   --integration after the unit stage, mutates again what it left alive against the integration
+#                 tests that reach those lines, one database per runner (see integration in README)
 #
 # Configuration: optional <back-dir>/.mutation.json, see README. Without it the defaults and what
 # can be detected from the repo apply. The effective values are printed to stderr and kept in
@@ -22,16 +24,18 @@ LOCKFILE=""
 
 fail() { echo "ERROR: $2" >&2; exit "$1"; }
 
-[ $# -ge 3 ] || fail 2 "usage: mutate.sh <back-dir> <out-dir> [--typecheck] <file>..."
+[ $# -ge 3 ] || fail 2 "usage: mutate.sh <back-dir> <out-dir> [--typecheck] [--integration] <file>..."
 BACK_DIR="$(cd "$1" 2>/dev/null && pwd)" || fail 2 "$1 does not exist"
 mkdir -p "$2" && OUT_DIR="$(cd "$2" && pwd)"
 shift 2
 
 TYPECHECK=false
+INTEGRATION=false
 FILES=()
 for arg in "$@"; do
   case "$arg" in
     --typecheck) TYPECHECK=true ;;
+    --integration) INTEGRATION=true ;;
     *) FILES+=("$arg") ;;
   esac
 done
@@ -45,6 +49,9 @@ config() { node -p "const c = require(process.argv[1]).effective; $1" "$OUT_DIR/
 PACKAGE_MANAGER="$(config c.packageManager)"
 LOCKFILE="$(config c.lockfile)"
 node -p "require(process.argv[1]).report.map((line) => 'config · ' + line).join('\\n')" "$OUT_DIR/config.json" >&2
+if $INTEGRATION; then
+  node -p "require(process.argv[1]).integrationReport.map((line) => 'config · ' + line).join('\\n')" "$OUT_DIR/config.json" >&2
+fi
 
 # The environment the unit suite runs with (`TZ=UTC jest ...` in its script, or "env" in
 # .mutation.json), for the baseline, Stryker and the rechecks alike.
@@ -132,31 +139,24 @@ fi
 # The config lives inside the repo because Stryker copies the project into a sandbox and jest
 # has to find it there, through relative paths.
 mkdir -p "$WORK_DIR"
-cp "$SKILL_DIR/assets/log-ignorer.mjs" "$SKILL_DIR/assets/call-patterns.mjs" "$SKILL_DIR/assets/load-jest-config.cjs" "$WORK_DIR/"
+ASSETS=(log-ignorer.mjs call-patterns.mjs load-jest-config.cjs jest-config.cjs claim-shard.cjs)
+cp "${ASSETS[@]/#/$SKILL_DIR/assets/}" "$WORK_DIR/"
 config 'JSON.stringify(c.ignoreCalls)' > "$WORK_DIR/ignore-calls.json"
 
-JEST_CONFIG="$(config 'JSON.stringify(c.jestConfig)')"
-SETUP_AFTER_ENV="$(config 'JSON.stringify(c.setupFilesAfterEnv)')"
-UNIT_IGNORES="$(config 'JSON.stringify(c.unitTestIgnorePatterns)')"
-
-# Paths are resolved from where this file is loaded: inside Stryker's sandbox they point to the
-# sandbox copy, so the setup files import the mutated code and not the original.
-cat > "$WORK_DIR/jest.config.cjs" <<JS
-const path = require("node:path");
-const loadJestConfig = require("./load-jest-config.cjs");
-
-const backDir = path.resolve(__dirname, "..");
-const toPath = (file) => (file.startsWith("<rootDir>") ? file : path.resolve(backDir, file));
-
-module.exports = async () => {
-  const base = await loadJestConfig(backDir, ${JEST_CONFIG});
-  return {
-    ...base,
-    setupFilesAfterEnv: [...(base.setupFilesAfterEnv ?? []), ...${SETUP_AFTER_ENV}.map(toPath)],
-    testPathIgnorePatterns: [...(base.testPathIgnorePatterns ?? ["/node_modules/"]), ...${UNIT_IGNORES}],
-  };
+# The unit stage's jest config: the repo's own, plus the unit script's setup files and exclusions.
+node -e '
+const { effective } = require(process.argv[1]);
+const settings = {
+  jestConfig: effective.jestConfig,
+  setupFilesAfterEnv: effective.setupFilesAfterEnv,
+  testPathIgnorePatterns: effective.unitTestIgnorePatterns,
+  testMatch: null,
+  selectedTests: null,
+  shard: null,
 };
-JS
+require("node:fs").writeFileSync(process.argv[2], JSON.stringify(settings, null, 2));
+' "$OUT_DIR/config.json" "$WORK_DIR/unit.json"
+echo 'module.exports = require("./jest-config.cjs")(__dirname, "unit.json");' > "$WORK_DIR/jest.config.cjs"
 
 # Precondition: the suite covering these files passes unmutated. With a red or flaky
 # baseline, every mutant counts as killed and the result is noise.
@@ -266,4 +266,10 @@ if [ -s "$OUT_DIR/timeouts.tsv" ]; then
   done < "$OUT_DIR/timeouts.tsv"
 fi
 
-node "$SKILL_DIR/scripts/reduce.mjs" "$OUT_DIR/mutation.json" "$OUT_DIR/recheck.tsv" "$OUT_DIR/warnings.txt" "$OUT_DIR/config.json" | tee "$OUT_DIR/summary.json"
+if $INTEGRATION; then
+  node "$SKILL_DIR/scripts/integration-stage.mjs" "$OUT_DIR" "$BACK_DIR" "$BACK_DIR/$WORK_DIR" "$SKILL_DIR" \
+    || echo "INTEGRATION_FAILED: the integration stage crashed; the unit result stands." | tee -a "$OUT_DIR/warnings.txt" >&2
+fi
+
+node "$SKILL_DIR/scripts/reduce.mjs" "$OUT_DIR/mutation.json" "$OUT_DIR/recheck.tsv" "$OUT_DIR/warnings.txt" "$OUT_DIR/config.json" "$OUT_DIR/integration" \
+  | tee "$OUT_DIR/summary.json"

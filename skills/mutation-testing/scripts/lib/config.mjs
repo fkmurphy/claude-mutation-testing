@@ -15,6 +15,8 @@ export const DEFAULT_IGNORE_CALLS = [
 ];
 export const DEFAULT_UNIT_TEST_IGNORE_PATTERNS = ["/integration/", "/e2e/"];
 const DEFAULT_UNIT_TEST_SCRIPTS = ["test-unit", "test:unit", "unit"];
+const DEFAULT_INTEGRATION_TEST_SCRIPTS = ["test-integration", "test:integration", "integration"];
+const DEFAULT_INTEGRATION_CONCURRENCY = 2;
 const DEFAULT_CONCURRENCY = 4;
 const DEFAULT_REUSE = 20;
 const PACKAGE_MANAGERS = { pnpm: "pnpm-lock.yaml", yarn: "yarn.lock", npm: "package-lock.json" };
@@ -35,10 +37,29 @@ const SCHEMA = {
     valid: (value) => typeof value === "string" && Object.hasOwn(PACKAGE_MANAGERS, value),
     description: `one of ${Object.keys(PACKAGE_MANAGERS).join(", ")}`,
   },
+  integration: { valid: (value) => isPlainObject(value), description: "an object" },
+};
+
+const INTEGRATION_SCHEMA = {
+  testScript: SCHEMA.unitTestScript,
+  testMatch: SCHEMA.unitTestIgnorePatterns,
+  setupFilesAfterEnv: SCHEMA.setupFilesAfterEnv,
+  env: SCHEMA.env,
+  concurrency: SCHEMA.concurrency,
+  database: { valid: (value) => isPlainObject(value), description: "an object" },
+};
+
+const isNonEmptyString = (value) => typeof value === "string" && value.length > 0;
+const DATABASE_SCHEMA = {
+  env: { valid: isNonEmptyString, description: "the name of the variable that holds the database name", required: true },
+  template: { valid: isNonEmptyString, description: "the database every shard is created from", required: true },
+  prepare: { valid: isNonEmptyString, description: "a shell command that creates $MUTATION_DB from $MUTATION_DB_TEMPLATE", required: true },
+  drop: { valid: isNonEmptyString, description: "a shell command that drops $MUTATION_DB" },
 };
 
 export const CONFIG_KEYS = Object.keys(SCHEMA);
 
+const isPlainObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const isStringArray = (value) => Array.isArray(value) && value.every((item) => typeof item === "string");
 const isStringRecord = (value) =>
   value !== null && typeof value === "object" && !Array.isArray(value) && Object.values(value).every((item) => typeof item === "string");
@@ -54,6 +75,15 @@ const readJson = (file, label) => {
   }
 };
 
+const validateSection = (section, schema, prefix) => {
+  const unknownKey = Object.keys(section).find((key) => !Object.hasOwn(schema, key));
+  if (unknownKey) throw new ConfigError(`.mutation.json has an unknown key: ${prefix}${unknownKey}. Known: ${Object.keys(schema).map((key) => prefix + key).join(", ")}`);
+  const invalidKey = Object.keys(section).find((key) => !schema[key].valid(section[key]));
+  if (invalidKey) throw new ConfigError(`.mutation.json: "${prefix}${invalidKey}" must be ${schema[invalidKey].description}`);
+  const missingKey = Object.keys(schema).find((key) => schema[key].required && section[key] === undefined);
+  if (missingKey) throw new ConfigError(`.mutation.json: "${prefix}${missingKey}" is required: ${schema[missingKey].description}`);
+};
+
 const readUserConfig = (backDir) => {
   const file = path.join(backDir, ".mutation.json");
   if (!existsSync(file)) return {};
@@ -61,12 +91,9 @@ const readUserConfig = (backDir) => {
   if (userConfig === null || typeof userConfig !== "object" || Array.isArray(userConfig)) {
     throw new ConfigError(".mutation.json must be a JSON object");
   }
-  const unknownKeys = Object.keys(userConfig).filter((key) => !Object.hasOwn(SCHEMA, key));
-  if (unknownKeys.length > 0) {
-    throw new ConfigError(`.mutation.json has unknown keys: ${unknownKeys.join(", ")}. Known: ${Object.keys(SCHEMA).join(", ")}`);
-  }
-  const invalidKey = Object.keys(userConfig).find((key) => !SCHEMA[key].valid(userConfig[key]));
-  if (invalidKey) throw new ConfigError(`.mutation.json: "${invalidKey}" must be ${SCHEMA[invalidKey].description}`);
+  validateSection(userConfig, SCHEMA, "");
+  if (userConfig.integration) validateSection(userConfig.integration, INTEGRATION_SCHEMA, "integration.");
+  if (userConfig.integration?.database) validateSection(userConfig.integration.database, DATABASE_SCHEMA, "integration.database.");
   return userConfig;
 };
 
@@ -101,15 +128,51 @@ const detectPackageManager = (backDir, userConfig, packageJson) => {
   return { value: "npm", lockfile: lockfileFor("npm"), source: "default: no lockfile found" };
 };
 
-const detectUnitScript = (userConfig, scripts) => {
-  if (userConfig.unitTestScript) {
-    if (!Object.hasOwn(scripts, userConfig.unitTestScript)) {
-      throw new ConfigError(`.mutation.json: unitTestScript "${userConfig.unitTestScript}" is not a script in package.json`);
-    }
-    return { name: userConfig.unitTestScript, source: ".mutation.json" };
+const detectScript = (configured, key, defaults, scripts) => {
+  if (configured) {
+    if (!Object.hasOwn(scripts, configured)) throw new ConfigError(`.mutation.json: ${key} "${configured}" is not a script in package.json`);
+    return { name: configured, source: ".mutation.json" };
   }
-  const name = DEFAULT_UNIT_TEST_SCRIPTS.find((candidate) => Object.hasOwn(scripts, candidate));
-  return name ? { name, source: "detected" } : { name: null, source: `none of ${DEFAULT_UNIT_TEST_SCRIPTS.join(", ")} in package.json` };
+  const name = defaults.find((candidate) => Object.hasOwn(scripts, candidate));
+  return name ? { name, source: "detected" } : { name: null, source: `none of ${defaults.join(", ")} in package.json` };
+};
+
+const readScript = (scriptName, scripts) => {
+  const invocation = scriptName ? findJestInvocation(scripts[scriptName], scripts) : null;
+  return { script: { name: scriptName, found: invocation !== null }, env: invocation?.env ?? {}, flags: readJestFlags(invocation?.args ?? []) };
+};
+
+// The integration stage: which tests count as integration, their setup and environment, and how
+// each Stryker runner gets a database of its own (a shard). Without a database, one runner.
+const resolveIntegration = (userIntegration, scripts) => {
+  const configured = userIntegration ?? {};
+  const testScript = detectScript(configured.testScript, "integration.testScript", DEFAULT_INTEGRATION_TEST_SCRIPTS, scripts);
+  const { script, env, flags } = readScript(testScript.name, scripts);
+  const testMatch = fromUserOrScript(configured.testMatch, flags.testMatch, script, []);
+  const setupFiles = fromUserOrScript(configured.setupFilesAfterEnv, flags.setupFilesAfterEnv, script, []);
+  const testEnv = fromUserOrScript(configured.env, env, script, {});
+  const database = configured.database ?? null;
+  const concurrency = database
+    ? { value: configured.concurrency ?? DEFAULT_INTEGRATION_CONCURRENCY, source: configured.concurrency ? ".mutation.json" : "default" }
+    : { value: 1, source: "no integration.database: one runner, so tests never share a database" };
+  return {
+    value: {
+      testScript: testScript.name,
+      testMatch: testMatch.value,
+      setupFilesAfterEnv: setupFiles.value,
+      env: testEnv.value,
+      concurrency: concurrency.value,
+      database,
+    },
+    source: {
+      testScript: testScript.source,
+      testMatch: testMatch.source,
+      setupFilesAfterEnv: setupFiles.source,
+      env: testEnv.source,
+      concurrency: concurrency.source,
+      database: database ? ".mutation.json" : "none",
+    },
+  };
 };
 
 const detectJestConfig = (backDir, flags, packageJson) => {
@@ -144,16 +207,15 @@ export const resolveConfig = (backDirArg, env = process.env) => {
   const scripts = packageJson.scripts ?? {};
   const userConfig = readUserConfig(backDir);
 
-  const unitScript = detectUnitScript(userConfig, scripts);
-  const invocation = unitScript.name ? findJestInvocation(scripts[unitScript.name], scripts) : null;
-  const script = { name: unitScript.name, found: invocation !== null };
-  const flags = readJestFlags(invocation?.args ?? []);
+  const unitScript = detectScript(userConfig.unitTestScript, "unitTestScript", DEFAULT_UNIT_TEST_SCRIPTS, scripts);
+  const { script, env: scriptEnv, flags } = readScript(unitScript.name, scripts);
 
   const packageManager = detectPackageManager(backDir, userConfig, packageJson);
   const jestConfig = detectJestConfig(backDir, flags, packageJson);
   const unitIgnores = fromUserOrScript(userConfig.unitTestIgnorePatterns, flags.testPathIgnorePatterns, script, DEFAULT_UNIT_TEST_IGNORE_PATTERNS);
   const setupFiles = fromUserOrScript(userConfig.setupFilesAfterEnv, flags.setupFilesAfterEnv, script, []);
-  const testEnv = fromUserOrScript(userConfig.env, invocation?.env ?? {}, script, {});
+  const testEnv = fromUserOrScript(userConfig.env, scriptEnv, script, {});
+  const integration = resolveIntegration(userConfig.integration, scripts);
   const concurrency = numberSetting(env, "MUTATE_CONCURRENCY", userConfig.concurrency, DEFAULT_CONCURRENCY);
   const reuse = numberSetting(env, "MUTATE_REUSE", userConfig.maxTestRunnerReuse, DEFAULT_REUSE);
 
@@ -177,6 +239,7 @@ export const resolveConfig = (backDirArg, env = process.env) => {
     excludedMutations: userConfig.excludedMutations ?? [],
     concurrency: concurrency.value,
     maxTestRunnerReuse: reuse.value,
+    integration: integration.value,
   };
   const sources = {
     packageManager: packageManager.source,
@@ -189,7 +252,13 @@ export const resolveConfig = (backDirArg, env = process.env) => {
     excludedMutations: userConfig.excludedMutations ? ".mutation.json" : "default",
     concurrency: concurrency.source,
     maxTestRunnerReuse: reuse.source,
+    integration: integration.source,
   };
-  const report = Object.keys(sources).map((key) => `${key}: ${JSON.stringify(effective[key])} (${sources[key]})`);
-  return { effective, sources, report };
+  const report = Object.keys(sources)
+    .filter((key) => key !== "integration")
+    .map((key) => `${key}: ${JSON.stringify(effective[key])} (${sources[key]})`);
+  const integrationReport = Object.keys(integration.source).map(
+    (key) => `integration.${key}: ${JSON.stringify(key === "database" && integration.value.database ? { env: integration.value.database.env, template: integration.value.database.template } : integration.value[key])} (${integration.source[key]})`,
+  );
+  return { effective, sources, report, integrationReport };
 };

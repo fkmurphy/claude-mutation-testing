@@ -6,7 +6,9 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "$schema": { "type": "string" },
+    "$schema": {
+      "type": "string"
+    },
     "unitTestScript": {
       "type": "string",
       "minLength": 1,
@@ -14,22 +16,30 @@
     },
     "unitTestIgnorePatterns": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "description": "Test paths kept out of the run (jest testPathIgnorePatterns), e.g. the integration suite. Default: the unit script's --testPathIgnorePatterns; without a unit script, /integration/ and /e2e/."
     },
     "setupFilesAfterEnv": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "description": "Added to the jest config's setupFilesAfterEnv. Relative to the service directory, or starting with <rootDir>. Default: the unit script's --setupFilesAfterEnv."
     },
     "env": {
       "type": "object",
-      "additionalProperties": { "type": "string" },
+      "additionalProperties": {
+        "type": "string"
+      },
       "description": "Environment for the baseline, Stryker and the rechecks. Default: the assignments in front of jest in the unit script, e.g. TZ=UTC."
     },
     "ignoreCalls": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "description": "Calls that are not mutated, with the statement that contains them. `*` stands for one name and never crosses a dot or a call; `{a,b}` is one of the names. Added to the defaults (log levels on *logger, console.*)."
     },
     "replaceDefaultIgnoreCalls": {
@@ -38,7 +48,9 @@
     },
     "excludedMutations": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "description": "Stryker mutators that do not run, e.g. StringLiteral. Default: none."
     },
     "concurrency": {
@@ -52,8 +64,82 @@
       "description": "Mutants per test runner before it is restarted. Default 20; MUTATE_REUSE overrides it."
     },
     "packageManager": {
-      "enum": ["pnpm", "yarn", "npm"],
+      "enum": [
+        "pnpm",
+        "yarn",
+        "npm"
+      ],
       "description": "Default: the closest lockfile up to the repo root, then the packageManager field of package.json, then npm."
+    },
+    "integration": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The integration stage, run with --integration: survivors of the unit stage are mutated again against the integration tests that reach them. Every Stryker runner is a shard with its own database.",
+      "properties": {
+        "testScript": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The script that runs the integration suite. Default: the first of test-integration, test:integration, integration."
+        },
+        "testMatch": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "What counts as an integration test (jest testMatch). Default: the integration script's --testMatch."
+        },
+        "setupFilesAfterEnv": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Default: the integration script's --setupFilesAfterEnv."
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Default: the variables in front of jest in the integration script."
+        },
+        "concurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Runners, one shard and one database each. Default 2 with a database; 1 without."
+        },
+        "database": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "env",
+            "template",
+            "prepare"
+          ],
+          "description": "How each shard gets its own database. Without it the stage runs with one runner, because tests that clean tables would wipe each other's data.",
+          "properties": {
+            "env": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The variable the app reads the database name from, e.g. DB_NAME."
+            },
+            "template": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The migrated test database every shard is copied from."
+            },
+            "prepare": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Shell command that creates the shard database $MUTATION_DB from $MUTATION_DB_TEMPLATE, e.g. createdb -T \"$MUTATION_DB_TEMPLATE\" \"$MUTATION_DB\". Run once per shard, before the stage."
+            },
+            "drop": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Shell command that drops $MUTATION_DB after the run. Optional: without it the shard databases are kept and reused."
+            }
+          }
+        }
+      }
     }
   }
 }
