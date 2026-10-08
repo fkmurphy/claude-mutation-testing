@@ -2,3 +2,4 @@ node_modules/
 .stryker-work/
 .stryker-tmp/
 .DS_Store
+evals/results/

@@ -1,0 +1,13 @@
+{
+  "name": "claude-mutation-testing",
+  "private": true,
+  "description": "Development scripts for the mutation plugin. The plugin itself has no dependencies.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test \"test/unit/*.test.mjs\"",
+    "test:e2e": "bash test/e2e/run.sh",
+    "lint": "shellcheck -S warning skills/mutation-testing/scripts/mutate.sh test/e2e/run.sh && node --check skills/mutation-testing/scripts/probe.mjs"
+  }
+}

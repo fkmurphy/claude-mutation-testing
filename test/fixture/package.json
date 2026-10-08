@@ -1,0 +1,12 @@
+{
+  "name": "mutation-fixture",
+  "private": true,
+  "scripts": {
+    "test-runner": "TZ=UTC jest",
+    "test-unit": "npm run test-runner -- --testPathIgnorePatterns=/integration/",
+    "test-integration": "npm run test-runner -- test/integration"
+  },
+  "devDependencies": {
+    "jest": "29.7.0"
+  }
+}
