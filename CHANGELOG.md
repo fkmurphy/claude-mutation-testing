@@ -7,6 +7,24 @@ version per batch: whatever is not published yet accumulates under `## Unrelease
 
 —
 
+## 0.3.0
+
+- **Configuration, optional.** `.mutation.json` in the service directory overrides what used to be
+  fixed: which calls are not mutated, the unit-test ignore patterns, the setup files, the
+  excluded mutators and the concurrency. Without the file everything keeps working as in 0.2.0,
+  and the run prints each effective value with where it came from (also under `config` in
+  `summary.json`). Why: the rules were the conventions of one codebase written into the script.
+- **Log calls are matched by pattern, not by hand-written AST checks.** The defaults now also cover
+  `this.logger.*`, which the previous matcher missed, `console.*` and optional calls (`logger?.info()`).
+- **Package manager and Jest config are detected.** pnpm, yarn or npm by lockfile; no lockfile
+  no longer breaks the run; `jest.config.cjs` and the `jest` key of `package.json` work.
+- **`probe.mjs` no longer reports `KILLED` when the command cannot run or times out.** It was
+  reading a missing binary as a mutant killed. Now it says `ERROR` or `TIMEOUT` and exits 3 or 4.
+- **`affected-tests.mjs` warns when the tsconfig excludes the tests** instead of returning an empty
+  answer, and fails with a clear message when there is no tsconfig.
+- **The agent no longer depends on the marketplace name** to find the scripts when
+  `${CLAUDE_SKILL_DIR}` is not substituted.
+
 ## 0.2.0
 
 - **`affected-tests.mjs`, experimental.** Selects the tests that reach the changed lines without

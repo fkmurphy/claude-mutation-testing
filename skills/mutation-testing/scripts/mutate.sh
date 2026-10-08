@@ -2,11 +2,15 @@
 # Runs Stryker on specific files of a Node/TypeScript service and leaves a reduced result.
 #
 # Usage: mutate.sh <back-dir> <out-dir> [--typecheck] <file> [<file>...]
-#   <back-dir>    the service directory with package.json and jest.config.js
+#   <back-dir>    the service directory with package.json and a jest config
 #   <out-dir>     where stryker.log, mutation.json and summary.json end up (outside the repo)
 #   <file>        paths relative to <back-dir>, e.g. src/lib/orders/Order.ts. Accepts a
 #                 line range to narrow it down: src/lib/orders/Order.ts:120-180
 #   --typecheck   discards the mutants TypeScript would reject (slower)
+#
+# Configuration: optional <back-dir>/.mutation.json, see README. Without it the defaults and what
+# can be detected from the repo apply. The effective values are printed to stderr and kept in
+# summary.json.
 #
 # Output: summary.json on stdout. Exit codes:
 #   0 ran · 2 bad usage · 3 red baseline · 4 Stryker failed · 5 could not install
@@ -14,6 +18,7 @@ set -uo pipefail
 
 STRYKER_VERSION="10.0.0"
 SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+LOCKFILE=""
 
 fail() { echo "ERROR: $2" >&2; exit "$1"; }
 
@@ -34,7 +39,13 @@ done
 
 cd "$BACK_DIR" || exit 2
 [ -f package.json ] || fail 2 "$BACK_DIR has no package.json"
-[ -f jest.config.js ] || fail 2 "$BACK_DIR has no jest.config.js"
+
+node "$SKILL_DIR/scripts/resolve-config.mjs" "$BACK_DIR" > "$OUT_DIR/config.json" || exit 2
+config() { node -p "const c = require('$OUT_DIR/config.json').effective; $1" ; }
+PACKAGE_MANAGER="$(config c.packageManager)"
+LOCKFILE="$(config c.lockfile)"
+JEST_CONFIG_FILE="$(config 'c.jestConfigFile ?? ""')"
+node -p "require('$OUT_DIR/config.json').report.map((line) => 'config · ' + line).join('\\n')" >&2
 
 SOURCE_FILES=()
 for spec in "${FILES[@]}"; do
@@ -66,17 +77,35 @@ cleanup() {
   rm -rf "$WORK_DIR" .stryker-tmp
   if [ -d "$SNAPSHOT_DIR" ]; then
     cp "$SNAPSHOT_DIR/package.json" package.json
-    cp "$SNAPSHOT_DIR/pnpm-lock.yaml" pnpm-lock.yaml
+    if [ -n "$LOCKFILE" ]; then
+      if [ -f "$SNAPSHOT_DIR/$LOCKFILE" ]; then cp "$SNAPSHOT_DIR/$LOCKFILE" "$LOCKFILE"; else rm -f "$LOCKFILE"; fi
+    fi
     rm -rf "$SNAPSHOT_DIR"
   fi
 }
 trap cleanup EXIT
 
+# Frozen installs only when there is a lockfile to freeze against.
+install_dependencies() {
+  case "$PACKAGE_MANAGER" in
+    pnpm) if [ -f "$LOCKFILE" ]; then pnpm install --frozen-lockfile --prefer-offline; else pnpm install; fi ;;
+    yarn) if [ -f "$LOCKFILE" ]; then yarn install --frozen-lockfile; else yarn install; fi ;;
+    npm) if [ -f "$LOCKFILE" ]; then npm ci --prefer-offline; else npm install; fi ;;
+  esac
+}
+add_dev_dependencies() {
+  case "$PACKAGE_MANAGER" in
+    pnpm) pnpm add -D "$@" ;;
+    yarn) yarn add -D "$@" ;;
+    npm) npm install -D "$@" ;;
+  esac
+}
+
 # The repo's dependencies. A freshly created worktree has no node_modules.
 if [ ! -d node_modules ]; then
-  echo "installing the repo's dependencies..." >&2
-  pnpm install --frozen-lockfile --prefer-offline >"$OUT_DIR/install.log" 2>&1 \
-    || fail 5 "pnpm install failed, see $OUT_DIR/install.log"
+  echo "installing the repo's dependencies with $PACKAGE_MANAGER..." >&2
+  install_dependencies >"$OUT_DIR/install.log" 2>&1 \
+    || fail 5 "$PACKAGE_MANAGER install failed, see $OUT_DIR/install.log"
 fi
 
 # Stryker, only when missing. package.json and the lockfile are restored on exit: the install
@@ -90,8 +119,9 @@ done
 if [ ${#MISSING[@]} -gt 0 ]; then
   echo "installing ${MISSING[*]}..." >&2
   mkdir -p "$SNAPSHOT_DIR"
-  cp package.json pnpm-lock.yaml "$SNAPSHOT_DIR/"
-  pnpm add -D "${MISSING[@]}" >"$OUT_DIR/install.log" 2>&1 \
+  cp package.json "$SNAPSHOT_DIR/"
+  [ -f "$LOCKFILE" ] && cp "$LOCKFILE" "$SNAPSHOT_DIR/"
+  add_dev_dependencies "${MISSING[@]}" >"$OUT_DIR/install.log" 2>&1 \
     || fail 5 "could not install Stryker, see $OUT_DIR/install.log"
 fi
 
@@ -99,22 +129,19 @@ fi
 # has to find it there, through relative paths.
 mkdir -p "$WORK_DIR"
 cp "$SKILL_DIR/assets/log-ignorer.mjs" "$WORK_DIR/"
+config 'JSON.stringify(c.ignoreCalls)' > "$WORK_DIR/ignore-calls.json"
 
-SETUP_AFTER_ENV="[]"
-[ -f src/test/globalSetup.ts ] && SETUP_AFTER_ENV='["<rootDir>/src/test/globalSetup.ts"]'
-
-# The unit suite is whatever the repo's own `test-unit` script runs: its --testPathIgnorePatterns
-# are read from package.json. Without that script, integration tests are assumed to live in
-# src/test/integration/.
-UNIT_IGNORES="$(node -e '
-const script = require("./package.json").scripts?.["test-unit"] ?? "";
-const patterns = [...script.matchAll(/--testPathIgnorePatterns[= ]["\x27]?([^"\x27 ]+)/g)].map((match) => match[1]);
-console.log(JSON.stringify(patterns.length > 0 ? patterns : ["/src/test/integration/"]));
-')"
+if [ -n "$JEST_CONFIG_FILE" ]; then
+  JEST_BASE="require(\"../$JEST_CONFIG_FILE\")"
+else
+  JEST_BASE="require(\"../package.json\").jest"
+fi
+SETUP_AFTER_ENV="$(config 'JSON.stringify(c.setupFiles)')"
+UNIT_IGNORES="$(config 'JSON.stringify(c.unitTestIgnorePatterns)')"
 
 cat > "$WORK_DIR/jest.config.cjs" <<JS
 const path = require("node:path");
-const base = require("../jest.config.js");
+const base = $JEST_BASE;
 
 module.exports = {
   ...base,
@@ -144,12 +171,13 @@ if ! node_modules/.bin/jest -c "$WORK_DIR/jest.config.cjs" --findRelatedTests "$
   exit 3
 fi
 
-node - "$WORK_DIR/stryker.config.json" "$OUT_DIR/mutation.json" "$TYPECHECK" "${MUTATE_CONCURRENCY:-4}" "${MUTATE_REUSE:-20}" "${FILES[@]}" <<'JS'
-const { writeFileSync } = require("node:fs");
-const [configPath, reportPath, typecheck, concurrency, reuse, ...files] = process.argv.slice(2);
+node - "$WORK_DIR/stryker.config.json" "$OUT_DIR/mutation.json" "$TYPECHECK" "$OUT_DIR/config.json" "${FILES[@]}" <<'JS'
+const { readFileSync, writeFileSync } = require("node:fs");
+const [configPath, reportPath, typecheck, resolvedPath, ...files] = process.argv.slice(2);
+const { effective } = JSON.parse(readFileSync(resolvedPath, "utf8"));
 const withTypecheck = typecheck === "true";
 const config = {
-  packageManager: "pnpm",
+  packageManager: effective.packageManager,
   testRunner: "jest",
   plugins: ["@stryker-mutator/jest-runner", ...(withTypecheck ? ["@stryker-mutator/typescript-checker"] : [])],
   appendPlugins: ["./.stryker-work/log-ignorer.mjs"],
@@ -157,9 +185,10 @@ const config = {
   jest: { projectType: "custom", configFile: ".stryker-work/jest.config.cjs", enableFindRelatedTests: true },
   coverageAnalysis: "perTest",
   ignoreStatic: true,
-  concurrency: Number(concurrency),
-  maxTestRunnerReuse: Number(reuse),
+  concurrency: effective.concurrency,
+  maxTestRunnerReuse: effective.maxTestRunnerReuse,
   mutate: files,
+  ...(effective.excludedMutations.length > 0 ? { mutator: { excludedMutations: effective.excludedMutations } } : {}),
   reporters: ["json"],
   jsonReporter: { fileName: reportPath },
   tempDirName: ".stryker-tmp",
@@ -206,4 +235,4 @@ if [ -s "$OUT_DIR/timeouts.tsv" ]; then
   done < "$OUT_DIR/timeouts.tsv"
 fi
 
-node "$SKILL_DIR/scripts/reduce.mjs" "$OUT_DIR/mutation.json" "$OUT_DIR/recheck.tsv" "$OUT_DIR/warnings.txt" | tee "$OUT_DIR/summary.json"
+node "$SKILL_DIR/scripts/reduce.mjs" "$OUT_DIR/mutation.json" "$OUT_DIR/recheck.tsv" "$OUT_DIR/warnings.txt" "$OUT_DIR/config.json" | tee "$OUT_DIR/summary.json"

@@ -21,12 +21,52 @@ real gaps are left.
   node skills/mutation-testing/scripts/affected-tests.mjs <back-dir> <file>[:<from>-<to>] [...]
   ```
 
-## Assumptions
+## Install
 
-- A service directory with `package.json`, `jest.config.js` and pnpm.
-- Unit tests are what the repo's `test-unit` script runs: its `--testPathIgnorePatterns` are
-  read from `package.json`. Without that script, integration tests are assumed to live in
-  `src/test/integration/`.
-- Logging through `logger.*`, `baseLogger.*` or `getLogger()`; those calls are not mutated.
+```
+/plugin marketplace add fkmurphy/claude-mutation-testing
+/plugin install mutation@claude-mutation-testing
+```
+
+Then ask for it in plain words ("check whether the tests of `src/lib/orders/Order.ts` protect
+anything") or call the agent `mutation:mutant-triager` with the service directory and the files.
+
+Requires Node, Jest, one of pnpm, yarn or npm, and `git` for throwaway worktrees (recommended).
+
+## Configuration
+
+Nothing is required: with no config file the defaults below apply, and what can be detected from
+the repo is detected. To change something, add an optional `.mutation.json` in the service
+directory (`<back-dir>`); each key you set overrides only that value.
+
+```json
+{
+  "ignoreCalls": ["audit.*"],
+  "unitTestIgnorePatterns": ["/src/test/integration/"],
+  "setupFiles": ["<rootDir>/src/test/globalSetup.ts"],
+  "excludedMutations": [],
+  "concurrency": 4
+}
+```
+
+| Key | Default without the file |
+|---|---|
+| `ignoreCalls` | `*logger.*`, `this.*logger.*`, `getLogger().*`, `console.*`: calls that are not mutated. Yours are **added** to these; set `replaceDefaultIgnoreCalls: true` to use only yours. `*` stands for one name |
+| `packageManager` | detected from the lockfile: `pnpm-lock.yaml`, `yarn.lock` or `package-lock.json` |
+| Jest config | `jest.config.js`, `jest.config.cjs` or the `jest` key of `package.json` |
+| `unitTestIgnorePatterns` | the `--testPathIgnorePatterns` of the repo's `test-unit` script; without it, `/src/test/integration/` |
+| `setupFiles` | `src/test/globalSetup.ts` if it exists |
+| `excludedMutations` | none: every mutator runs |
+| `concurrency`, `maxTestRunnerReuse` | 4 and 20; also `MUTATE_CONCURRENCY` and `MUTATE_REUSE` |
+
+The run prints the effective value of each setting and where it came from, and `summary.json`
+carries it under `config`.
+
+Only Jest is supported as a test runner. The scripts run the repo's install and its tests, and
+`probe.mjs` edits files in place: use it on code you trust.
 
 See `CHANGELOG.md` for what changed and why.
+
+## License
+
+MIT, see `LICENSE`.
