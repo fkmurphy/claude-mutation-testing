@@ -9,11 +9,28 @@ version per batch: whatever is not published yet accumulates under `## Unrelease
 
 ## 0.3.0
 
+- **Defaults come from the repo's own unit test script, not from one codebase's conventions.**
+  The script is the first of `test-unit`, `test:unit` and `unit` (or `unitTestScript`), followed
+  through `pnpm run`/`npm run`/`yarn` references down to the jest call. From there come the
+  ignore patterns, the `setupFilesAfterEnv`, the jest `--config` and the environment in front of
+  jest (`TZ=UTC jest`). Before, one fixed setup file path was assumed, `TZ=Etc/UTC` was forced
+  on every run and probe, and only `test-unit`'s ignore patterns were read. Without a unit script
+  the exclusions are `/integration/` and `/e2e/`. Measured on five real services: the same values
+  as the old hardcoded ones, and one exclusion the old reading missed.
+- **Any jest config format.** The generated config loads the repo's own through jest-config's
+  `readInitialOptions`, the loader jest and Stryker use: `.ts`, `.mjs`, `.json`, functions and the
+  `jest` key of `package.json`, with paths resolved inside Stryker's sandbox. Needs jest 29.3+.
+- **The baseline can no longer pass empty.** It ran `--findRelatedTests --passWithNoTests`; when
+  the jest `roots` leave the source out, no test is related by imports and the precondition
+  passed without running anything. Now it widens to the whole unit suite (`BASELINE_WIDENED` in
+  `warnings`), and an empty suite stops the run (`NO_TESTS`, exit 3). A red Stryker initial run
+  is also exit 3 instead of 4. Found by the new end-to-end test.
 - **Configuration, optional.** `.mutation.json` in the service directory overrides what used to be
   fixed: which calls are not mutated, the unit-test ignore patterns, the `setupFilesAfterEnv`, the
   excluded mutators and the concurrency. Without the file everything keeps working as in 0.2.0,
   and the run prints each effective value with where it came from (also under `config` in
-  `summary.json`). Unknown keys stop the run; `$schema` is accepted. Why: the rules were the
+  `summary.json`). Unknown keys stop the run; `$schema` is accepted and
+  `schema/mutation.schema.json` documents every key. Why: the rules were the
   conventions of one codebase written into the script.
 - **Log calls are matched by pattern, not by hand-written AST checks.** The defaults keep the
   method list of 0.2.0 (the log levels and `child`) and now also cover `this.logger.*`, which the
@@ -37,7 +54,13 @@ version per batch: whatever is not published yet accumulates under `## Unrelease
   answer, and fails with a clear message when there is no tsconfig.
 - **The agent no longer depends on the marketplace name** to find the scripts when
   `${CLAUDE_SKILL_DIR}` is not substituted: it reads `installed_plugins.json`.
-- **More test paths are refused as mutation targets:** `*.test.*`, `*.spec.*` and `__tests__/`.
+- **More test paths are refused as mutation targets:** `*.test.*`, `*.spec.*`, `__tests__/`, `test/`
+  and `tests/`.
+- **The plugin has its own tests.** Unit tests with `node:test` (config, script parsing, call
+  patterns, probe, reduce), an end-to-end run of `mutate.sh` on a fixture that plants one gap,
+  two equivalent mutants, a log call and a failing integration test, CI on Node 22 and 24, and
+  `claude plugin eval` cases for when the skill fires (and when it must not) and for the triage
+  of the fixture. Node 22 is required, as by Stryker 10.
 
 ## 0.2.0
 

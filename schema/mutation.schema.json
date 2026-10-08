@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/fkmurphy/claude-mutation-testing/main/schema/mutation.schema.json",
+  "title": ".mutation.json",
+  "description": "Optional configuration of the mutation plugin, in the service directory. Every key overrides only its own value; without the file, the defaults and what is read from the repo apply.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "unitTestScript": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The package.json script that runs the unit suite. Its jest invocation, followed through `pnpm run`/`npm run`/`yarn` references, gives the ignore patterns, setup files, environment and jest config. Default: the first of test-unit, test:unit, unit."
+    },
+    "unitTestIgnorePatterns": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Test paths kept out of the run (jest testPathIgnorePatterns), e.g. the integration suite. Default: the unit script's --testPathIgnorePatterns; without a unit script, /integration/ and /e2e/."
+    },
+    "setupFilesAfterEnv": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Added to the jest config's setupFilesAfterEnv. Relative to the service directory, or starting with <rootDir>. Default: the unit script's --setupFilesAfterEnv."
+    },
+    "env": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "Environment for the baseline, Stryker and the rechecks. Default: the assignments in front of jest in the unit script, e.g. TZ=UTC."
+    },
+    "ignoreCalls": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Calls that are not mutated, with the statement that contains them. `*` stands for one name and never crosses a dot or a call; `{a,b}` is one of the names. Added to the defaults (log levels on *logger, console.*)."
+    },
+    "replaceDefaultIgnoreCalls": {
+      "type": "boolean",
+      "description": "Use only ignoreCalls, without the defaults."
+    },
+    "excludedMutations": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Stryker mutators that do not run, e.g. StringLiteral. Default: none."
+    },
+    "concurrency": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Stryker test runners in parallel. Default 4; MUTATE_CONCURRENCY overrides it."
+    },
+    "maxTestRunnerReuse": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Mutants per test runner before it is restarted. Default 20; MUTATE_REUSE overrides it."
+    },
+    "packageManager": {
+      "enum": ["pnpm", "yarn", "npm"],
+      "description": "Default: the closest lockfile up to the repo root, then the packageManager field of package.json, then npm."
+    }
+  }
+}
