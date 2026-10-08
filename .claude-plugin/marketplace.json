@@ -1,0 +1,16 @@
+{
+  "name": "claude-mutation-testing",
+  "owner": {
+    "name": "Julian Murphy"
+  },
+  "plugins": [
+    {
+      "name": "mutation",
+      "source": "./",
+      "description": "Mutation testing with Stryker for Node/TypeScript services: a script that runs everything and an agent that triages the survivors"
+    }
+  ],
+  "metadata": {
+    "description": "Mutation testing with Stryker for Node/TypeScript services"
+  }
+}
