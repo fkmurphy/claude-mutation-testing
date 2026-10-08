@@ -5,6 +5,10 @@ version per batch: whatever is not published yet accumulates under `## Unrelease
 
 ## Unreleased
 
+—
+
+## 0.4.0
+
 - **Integration stage, with one database per runner.** `mutate.sh --integration` takes what the
   unit stage left alive (survivors and NoCoverage), mutates exactly those positions again with
   Stryker's line:column ranges, and runs the integration tests that `affected-tests.mjs` finds for
