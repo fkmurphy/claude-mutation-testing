@@ -6,7 +6,15 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
-const DEFAULT_IGNORE_CALLS = ["*logger.*", "this.*logger.*", "getLogger().*", "console.*"];
+const LOG_METHODS = "{info,warn,error,debug,trace,fatal,child}";
+const DEFAULT_IGNORE_CALLS = [
+  `*logger.${LOG_METHODS}`,
+  `this.*logger.${LOG_METHODS}`,
+  `*logger.child().${LOG_METHODS}`,
+  `this.*logger.child().${LOG_METHODS}`,
+  `getLogger().${LOG_METHODS}`,
+  "console.*",
+];
 const DEFAULT_CONCURRENCY = 4;
 const DEFAULT_REUSE = 20;
 const DEFAULT_UNIT_IGNORES = ["/src/test/integration/"];
@@ -15,10 +23,11 @@ const PACKAGE_MANAGERS = { pnpm: "pnpm-lock.yaml", yarn: "yarn.lock", npm: "pack
 const JEST_CONFIG_FILES = ["jest.config.js", "jest.config.cjs"];
 const UNSUPPORTED_JEST_CONFIG_FILES = ["jest.config.mjs", "jest.config.ts", "jest.config.json"];
 const KNOWN_KEYS = [
+  "$schema",
   "ignoreCalls",
   "replaceDefaultIgnoreCalls",
   "unitTestIgnorePatterns",
-  "setupFiles",
+  "setupFilesAfterEnv",
   "excludedMutations",
   "concurrency",
   "maxTestRunnerReuse",
@@ -56,19 +65,43 @@ const isPositiveInteger = (value) => Number.isInteger(value) && value > 0;
 requireType("ignoreCalls", isStringArray, "an array of strings");
 requireType("replaceDefaultIgnoreCalls", (value) => typeof value === "boolean", "a boolean");
 requireType("unitTestIgnorePatterns", isStringArray, "an array of strings");
-requireType("setupFiles", isStringArray, "an array of strings");
+requireType("setupFilesAfterEnv", isStringArray, "an array of strings");
 requireType("excludedMutations", isStringArray, "an array of strings");
 requireType("concurrency", isPositiveInteger, "a positive integer");
 requireType("maxTestRunnerReuse", isPositiveInteger, "a positive integer");
-requireType("packageManager", (value) => value in PACKAGE_MANAGERS, `one of ${Object.keys(PACKAGE_MANAGERS).join(", ")}`);
+requireType("packageManager", (value) => typeof value === "string" && Object.hasOwn(PACKAGE_MANAGERS, value), `one of ${Object.keys(PACKAGE_MANAGERS).join(", ")}`);
 
 const packageJson = existsSync(inBackDir("package.json")) ? JSON.parse(readFileSync(inBackDir("package.json"), "utf8")) : {};
 
+// Workspaces keep the lockfile at the root, so the search goes up to the repo root.
+const ancestorsUpToRepoRoot = (directory) => {
+  const parent = path.dirname(directory);
+  const isRepoRoot = existsSync(path.join(directory, ".git")) || parent === directory;
+  return isRepoRoot ? [directory] : [directory, ...ancestorsUpToRepoRoot(parent)];
+};
+
+const findLockfile = (lockfileName) =>
+  ancestorsUpToRepoRoot(backDir)
+    .map((directory) => path.join(directory, lockfileName))
+    .find((candidate) => existsSync(candidate));
+
+const lockfileFor = (manager) => {
+  const found = findLockfile(PACKAGE_MANAGERS[manager]);
+  return found ? path.relative(backDir, found) : PACKAGE_MANAGERS[manager];
+};
+
 const detectPackageManager = () => {
   if (userConfig.packageManager) return { value: userConfig.packageManager, source: ".mutation.json" };
-  const detected = Object.entries(PACKAGE_MANAGERS).find(([, lockfile]) => existsSync(inBackDir(lockfile)));
-  if (!detected) return fail('no lockfile found (pnpm-lock.yaml, yarn.lock, package-lock.json): set "packageManager" in .mutation.json');
-  return { value: detected[0], source: `detected from ${detected[1]}` };
+  // The closest lockfile wins: a service with its own yarn.lock inside a pnpm repo is yarn.
+  const detected = ancestorsUpToRepoRoot(backDir)
+    .flatMap((directory) =>
+      Object.entries(PACKAGE_MANAGERS).map(([manager, lockfileName]) => ({ manager, lockfile: path.join(directory, lockfileName) })),
+    )
+    .find(({ lockfile }) => existsSync(lockfile));
+  if (detected) return { value: detected.manager, source: `detected from ${path.relative(backDir, detected.lockfile)}` };
+  const declared = /^(pnpm|yarn|npm)@/.exec(packageJson.packageManager ?? "")?.[1];
+  if (declared) return { value: declared, source: 'detected from the "packageManager" field of package.json' };
+  return { value: "npm", source: "default: no lockfile found" };
 };
 
 const detectJestConfig = () => {
@@ -88,14 +121,18 @@ const detectUnitIgnores = () => {
   return { value: DEFAULT_UNIT_IGNORES, source: "default" };
 };
 
-const detectSetupFiles = () => {
-  if (userConfig.setupFiles) return { value: userConfig.setupFiles, source: ".mutation.json" };
+const detectSetupFilesAfterEnv = () => {
+  if (userConfig.setupFilesAfterEnv) return { value: userConfig.setupFilesAfterEnv, source: ".mutation.json" };
   if (existsSync(inBackDir(DEFAULT_SETUP_FILE))) return { value: [`<rootDir>/${DEFAULT_SETUP_FILE}`], source: `detected ${DEFAULT_SETUP_FILE}` };
   return { value: [], source: "default" };
 };
 
 const numberSetting = (envName, key, fallback) => {
-  if (process.env[envName]) return { value: Number(process.env[envName]), source: `env ${envName}` };
+  const fromEnv = process.env[envName];
+  if (fromEnv !== undefined && fromEnv !== "") {
+    if (!/^[1-9]\d*$/.test(fromEnv)) fail(`${envName} must be a positive integer, got "${fromEnv}"`);
+    return { value: Number(fromEnv), source: `env ${envName}` };
+  }
   if (userConfig[key]) return { value: userConfig[key], source: ".mutation.json" };
   return { value: fallback, source: "default" };
 };
@@ -103,7 +140,7 @@ const numberSetting = (envName, key, fallback) => {
 const packageManager = detectPackageManager();
 const jestConfig = detectJestConfig();
 const unitIgnores = detectUnitIgnores();
-const setupFiles = detectSetupFiles();
+const setupFilesAfterEnv = detectSetupFilesAfterEnv();
 const concurrency = numberSetting("MUTATE_CONCURRENCY", "concurrency", DEFAULT_CONCURRENCY);
 const reuse = numberSetting("MUTATE_REUSE", "maxTestRunnerReuse", DEFAULT_REUSE);
 
@@ -118,10 +155,10 @@ const ignoreCallsSource =
 
 const effective = {
   packageManager: packageManager.value,
-  lockfile: PACKAGE_MANAGERS[packageManager.value],
+  lockfile: lockfileFor(packageManager.value),
   jestConfigFile: jestConfig.file,
   unitTestIgnorePatterns: unitIgnores.value,
-  setupFiles: setupFiles.value,
+  setupFilesAfterEnv: setupFilesAfterEnv.value,
   ignoreCalls,
   excludedMutations: userConfig.excludedMutations ?? [],
   concurrency: concurrency.value,
@@ -131,7 +168,7 @@ const sources = {
   packageManager: packageManager.source,
   jestConfigFile: jestConfig.source,
   unitTestIgnorePatterns: unitIgnores.source,
-  setupFiles: setupFiles.source,
+  setupFilesAfterEnv: setupFilesAfterEnv.source,
   ignoreCalls: ignoreCallsSource,
   excludedMutations: userConfig.excludedMutations ? ".mutation.json" : "default",
   concurrency: concurrency.source,

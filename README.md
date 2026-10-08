@@ -43,7 +43,7 @@ directory (`<back-dir>`); each key you set overrides only that value.
 {
   "ignoreCalls": ["audit.*"],
   "unitTestIgnorePatterns": ["/src/test/integration/"],
-  "setupFiles": ["<rootDir>/src/test/globalSetup.ts"],
+  "setupFilesAfterEnv": ["<rootDir>/src/test/globalSetup.ts"],
   "excludedMutations": [],
   "concurrency": 4
 }
@@ -51,18 +51,18 @@ directory (`<back-dir>`); each key you set overrides only that value.
 
 | Key | Default without the file |
 |---|---|
-| `ignoreCalls` | `*logger.*`, `this.*logger.*`, `getLogger().*`, `console.*`: calls that are not mutated. Yours are **added** to these; set `replaceDefaultIgnoreCalls: true` to use only yours. `*` stands for one name |
-| `packageManager` | detected from the lockfile: `pnpm-lock.yaml`, `yarn.lock` or `package-lock.json` |
+| `ignoreCalls` | the log levels (`info`, `warn`, `error`, `debug`, `trace`, `fatal`, `child`) on `*logger`, `this.*logger`, `*logger.child()` and `getLogger()`, plus `console.*`: calls that are not mutated. Yours are **added** to these; set `replaceDefaultIgnoreCalls: true` to use only yours. `*` stands for one name and never crosses a dot or a call; `{a,b}` is one of the listed names, e.g. `audit.{info,warn}` |
+| `packageManager` | detected from the lockfile (`pnpm-lock.yaml`, `yarn.lock` or `package-lock.json`) in `<back-dir>` or above it up to the repo root, then from the `packageManager` field of `package.json`; without either, `npm` |
 | Jest config | `jest.config.js`, `jest.config.cjs` or the `jest` key of `package.json` |
 | `unitTestIgnorePatterns` | the `--testPathIgnorePatterns` of the repo's `test-unit` script; without it, `/src/test/integration/` |
-| `setupFiles` | `src/test/globalSetup.ts` if it exists |
+| `setupFilesAfterEnv` | `src/test/globalSetup.ts` if it exists. Added to the `setupFilesAfterEnv` of the jest config |
 | `excludedMutations` | none: every mutator runs |
 | `concurrency`, `maxTestRunnerReuse` | 4 and 20; also `MUTATE_CONCURRENCY` and `MUTATE_REUSE` |
 
 The run prints the effective value of each setting and where it came from, and `summary.json`
 carries it under `config`.
 
-Only Jest is supported as a test runner. The scripts run the repo's install and its tests, and
+Only Jest is supported as a test runner, with a CommonJS config that exports an object: `jest.config.ts`, `.mjs` and a config that exports a function are not supported yet. Yarn means yarn classic (1.x): Berry with Plug'n'Play has no `node_modules` to run from. The scripts run the repo's install and its tests, and
 `probe.mjs` edits files in place: use it on code you trust.
 
 See `CHANGELOG.md` for what changed and why.

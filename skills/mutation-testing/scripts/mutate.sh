@@ -53,7 +53,7 @@ for spec in "${FILES[@]}"; do
   SOURCE_FILES+=("$file")
   [ -f "$file" ] || fail 2 "$file does not exist (paths are relative to $BACK_DIR)"
   case "$file" in
-    *.test.ts|*.spec.ts|src/test/*) fail 2 "$file is a test: mutate the code, not the test" ;;
+    *.test.*|*.spec.*|*/__tests__/*|__tests__/*|src/test/*) fail 2 "$file is a test: mutate the code, not the test" ;;
   esac
 done
 
@@ -77,9 +77,8 @@ cleanup() {
   rm -rf "$WORK_DIR" .stryker-tmp
   if [ -d "$SNAPSHOT_DIR" ]; then
     cp "$SNAPSHOT_DIR/package.json" package.json
-    if [ -n "$LOCKFILE" ]; then
-      if [ -f "$SNAPSHOT_DIR/$LOCKFILE" ]; then cp "$SNAPSHOT_DIR/$LOCKFILE" "$LOCKFILE"; else rm -f "$LOCKFILE"; fi
-    fi
+    # The lockfile can live above <back-dir> in a workspace, so the snapshot uses a fixed name.
+    if [ -f "$SNAPSHOT_DIR/lockfile" ]; then cp "$SNAPSHOT_DIR/lockfile" "$LOCKFILE"; else rm -f "$LOCKFILE"; fi
     rm -rf "$SNAPSHOT_DIR"
   fi
 }
@@ -120,7 +119,7 @@ if [ ${#MISSING[@]} -gt 0 ]; then
   echo "installing ${MISSING[*]}..." >&2
   mkdir -p "$SNAPSHOT_DIR"
   cp package.json "$SNAPSHOT_DIR/"
-  [ -f "$LOCKFILE" ] && cp "$LOCKFILE" "$SNAPSHOT_DIR/"
+  [ -f "$LOCKFILE" ] && cp "$LOCKFILE" "$SNAPSHOT_DIR/lockfile"
   add_dev_dependencies "${MISSING[@]}" >"$OUT_DIR/install.log" 2>&1 \
     || fail 5 "could not install Stryker, see $OUT_DIR/install.log"
 fi
@@ -136,7 +135,7 @@ if [ -n "$JEST_CONFIG_FILE" ]; then
 else
   JEST_BASE="require(\"../package.json\").jest"
 fi
-SETUP_AFTER_ENV="$(config 'JSON.stringify(c.setupFiles)')"
+SETUP_AFTER_ENV="$(config 'JSON.stringify(c.setupFilesAfterEnv)')"
 UNIT_IGNORES="$(config 'JSON.stringify(c.unitTestIgnorePatterns)')"
 
 cat > "$WORK_DIR/jest.config.cjs" <<JS
@@ -164,12 +163,14 @@ if [ -n "$OTHER_JEST" ]; then
 fi
 
 echo "baseline of the related tests..." >&2
+BASELINE_START=$(date +%s)
 if ! node_modules/.bin/jest -c "$WORK_DIR/jest.config.cjs" --findRelatedTests "${SOURCE_FILES[@]}" \
     --passWithNoTests --silent >"$OUT_DIR/baseline.log" 2>&1; then
   echo "RED_BASELINE: the related tests fail without any mutation. Nothing Stryker says is valid." >&2
   grep -E "✕|●|Tests:" "$OUT_DIR/baseline.log" | head -30 >&2
   exit 3
 fi
+BASELINE_SECONDS=$(( $(date +%s) - BASELINE_START ))
 
 node - "$WORK_DIR/stryker.config.json" "$OUT_DIR/mutation.json" "$TYPECHECK" "$OUT_DIR/config.json" "${FILES[@]}" <<'JS'
 const { readFileSync, writeFileSync } = require("node:fs");
@@ -226,12 +227,20 @@ Object.values(report.files)
 JS
 : > "$OUT_DIR/recheck.tsv"
 if [ -s "$OUT_DIR/timeouts.tsv" ]; then
-  echo "rechecking $(wc -l < "$OUT_DIR/timeouts.tsv" | tr -d ' ') timeout(s) with no load..." >&2
+  # Each recheck runs a few test files alone, so the whole related baseline is a generous bound;
+  # without one, a mutant that hangs without reaching Stryker's hit limit would stall the run.
+  RECHECK_TIMEOUT_MS="${PROBE_TIMEOUT_MS:-$(( (BASELINE_SECONDS * 3 + 60) * 1000 ))}"
+  echo "rechecking $(wc -l < "$OUT_DIR/timeouts.tsv" | tr -d ' ') timeout(s) with no load (up to $(( RECHECK_TIMEOUT_MS / 1000 ))s each)..." >&2
   while IFS=$'\t' read -r mutant_id test_files; do
     # shellcheck disable=SC2086
-    verdict="$(node "$SKILL_DIR/scripts/probe.mjs" "$OUT_DIR/mutation.json" . "$mutant_id" -- \
-      node_modules/.bin/jest -c "$WORK_DIR/jest.config.cjs" --silent $test_files | head -1 | cut -d' ' -f1)"
+    probe_output="$(PROBE_TIMEOUT_MS="$RECHECK_TIMEOUT_MS" node "$SKILL_DIR/scripts/probe.mjs" "$OUT_DIR/mutation.json" . "$mutant_id" -- \
+      node_modules/.bin/jest -c "$WORK_DIR/jest.config.cjs" --silent $test_files | head -1)"
+    verdict="${probe_output%% *}"
     printf '%s\t%s\n' "$mutant_id" "$verdict" >> "$OUT_DIR/recheck.tsv"
+    case "$verdict" in
+      KILLED|SURVIVED) ;;
+      *) echo "RECHECK_INCONCLUSIVE: ${probe_output:-mutant $mutant_id: probe printed nothing}. It stays counted as a timeout." | tee -a "$OUT_DIR/warnings.txt" >&2 ;;
+    esac
   done < "$OUT_DIR/timeouts.tsv"
 fi
 

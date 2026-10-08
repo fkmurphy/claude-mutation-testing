@@ -10,20 +10,34 @@ version per batch: whatever is not published yet accumulates under `## Unrelease
 ## 0.3.0
 
 - **Configuration, optional.** `.mutation.json` in the service directory overrides what used to be
-  fixed: which calls are not mutated, the unit-test ignore patterns, the setup files, the
+  fixed: which calls are not mutated, the unit-test ignore patterns, the `setupFilesAfterEnv`, the
   excluded mutators and the concurrency. Without the file everything keeps working as in 0.2.0,
   and the run prints each effective value with where it came from (also under `config` in
-  `summary.json`). Why: the rules were the conventions of one codebase written into the script.
-- **Log calls are matched by pattern, not by hand-written AST checks.** The defaults now also cover
-  `this.logger.*`, which the previous matcher missed, `console.*` and optional calls (`logger?.info()`).
-- **Package manager and Jest config are detected.** pnpm, yarn or npm by lockfile; no lockfile
-  no longer breaks the run; `jest.config.cjs` and the `jest` key of `package.json` work.
-- **`probe.mjs` no longer reports `KILLED` when the command cannot run or times out.** It was
-  reading a missing binary as a mutant killed. Now it says `ERROR` or `TIMEOUT` and exits 3 or 4.
+  `summary.json`). Unknown keys stop the run; `$schema` is accepted. Why: the rules were the
+  conventions of one codebase written into the script.
+- **Log calls are matched by pattern, not by hand-written AST checks.** The defaults keep the
+  method list of 0.2.0 (the log levels and `child`) and now also cover `this.logger.*`, which the
+  previous matcher missed, chained children (`logger.child({...}).info(...)`), `console.*` and
+  optional calls (`logger?.info()`). A pattern accepts `*` for one name and `{a,b}` for one of
+  several; a method that is not a log level (`auditLogger.record(...)`) is still mutated.
+- **Package manager and Jest config are detected.** pnpm, yarn (classic) or npm by lockfile, looked
+  up from `<back-dir>` to the repo root so workspaces work, then by the `packageManager` field of
+  `package.json`, then npm. The lockfile is restored on exit even when it lives above
+  `<back-dir>`. `jest.config.cjs` and the `jest` key of `package.json` work.
+- **`probe.mjs` confirms every `KILLED`.** When the command fails with the mutant it runs again
+  without it; if it fails there too (a database that is down, a red test) the verdict is `ERROR`,
+  not `KILLED`. A missing binary is `ERROR` and a command that does not finish is `TIMEOUT`
+  (exit 3 and 4). Why: an integration probe with the database down read as a kill and discarded a
+  real gap as `killed-by-integration`.
+- **Inconclusive timeout rechecks are reported.** A recheck that ends in `ERROR` or `TIMEOUT` goes
+  to `warnings` as `RECHECK_INCONCLUSIVE` and is counted in `timeoutsInconclusive`. Each recheck
+  is bounded by three times the related-tests baseline plus a minute.
+- **Settings are validated.** `MUTATE_CONCURRENCY` and `MUTATE_REUSE` must be positive integers.
 - **`affected-tests.mjs` warns when the tsconfig excludes the tests** instead of returning an empty
   answer, and fails with a clear message when there is no tsconfig.
 - **The agent no longer depends on the marketplace name** to find the scripts when
-  `${CLAUDE_SKILL_DIR}` is not substituted.
+  `${CLAUDE_SKILL_DIR}` is not substituted: it reads `installed_plugins.json`.
+- **More test paths are refused as mutation targets:** `*.test.*`, `*.spec.*` and `__tests__/`.
 
 ## 0.2.0
 

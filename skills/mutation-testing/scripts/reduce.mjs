@@ -1,7 +1,7 @@
 // Reduces Stryker's mutation.json to what needs triage: survivors with their context,
 // NoCoverage grouped by file, and kills suspected to come from a flaky suite.
 // Usage: node reduce.mjs <mutation.json> [recheck.tsv] [warnings.txt] [config.json]
-//   recheck.tsv: id<TAB>KILLED|SURVIVED for the timeouts rerun with no load
+//   recheck.tsv: id<TAB>KILLED|SURVIVED|ERROR|TIMEOUT for the timeouts rerun with no load
 import { existsSync, readFileSync } from "node:fs";
 
 const SUSPICIOUS_KILL = /Exceeded timeout|ECONNREFUSED|ECONNRESET|socket hang up|Cannot log after tests are done|SIGSEGV|out of memory/i;
@@ -121,6 +121,7 @@ console.log(
         suspiciousKills: suspiciousKills.length,
         timeoutsRechecked: recheck.size,
         timeoutsRevived: mutants.filter((mutant) => mutant.revivedFromTimeout).length,
+        timeoutsInconclusive: [...recheck.values()].filter((verdict) => verdict !== "KILLED" && verdict !== "SURVIVED").length,
       },
       warnings,
       ...(configuration ? { config: { effective: configuration.effective, sources: configuration.sources } } : {}),

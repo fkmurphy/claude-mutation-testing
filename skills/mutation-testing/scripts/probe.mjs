@@ -2,9 +2,10 @@
 // Settles a survivor: does integration kill it? is it equivalent?
 //
 // Usage: node probe.mjs <mutation.json> <back-dir> <mutant-id> -- <command> [args...]
-// Output: KILLED if the command fails with the mutant applied, SURVIVED if it passes. If the
-// command cannot run or runs out of time (PROBE_TIMEOUT_MS, default 10 min) the verdict is ERROR
-// or TIMEOUT, exit 3 or 4: that says nothing about the mutant.
+// Output: KILLED if the command fails with the mutant applied and passes without it, SURVIVED if
+// it passes with the mutant. A failure is always confirmed by running the command again without
+// the mutant: if it fails there too (a database that is down, a red test) the verdict is ERROR.
+// ERROR (exit 3) and TIMEOUT (exit 4, PROBE_TIMEOUT_MS, default 10 min) say nothing about the mutant.
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -44,16 +45,39 @@ const restore = () => writeFileSync(filePath, original);
   }),
 );
 
-writeFileSync(filePath, mutated);
-let result;
-try {
-  result = spawnSync(command[0], command.slice(1), {
+const run = () =>
+  spawnSync(command[0], command.slice(1), {
     cwd: backDir,
     encoding: "utf8",
     env: { ...process.env, TZ: "Etc/UTC" },
     maxBuffer: 64 * 1024 * 1024,
     timeout: Number(process.env.PROBE_TIMEOUT_MS ?? 10 * 60 * 1000),
   });
+
+const failureSummary = (result) =>
+  `${result.stdout ?? ""}${result.stderr ?? ""}`
+    .split("\n")
+    .filter((line) => /✕|●|Tests:|Test Suites:/.test(line))
+    .slice(0, 15)
+    .join("\n");
+
+const where = `mutant ${mutantId} · ${found.file}:${start.line}`;
+
+const exitIfNotConclusive = (result, label) => {
+  if (result.error?.code === "ETIMEDOUT") {
+    console.log(`TIMEOUT · ${where}: the command did not finish ${label}, nothing can be said about the mutant`);
+    process.exit(4);
+  }
+  if (result.error || result.status === null) {
+    console.log(`ERROR · ${where}: the command could not run ${label} (${result.error?.message ?? `signal ${result.signal}`})`);
+    process.exit(3);
+  }
+};
+
+writeFileSync(filePath, mutated);
+let mutatedResult;
+try {
+  mutatedResult = run();
 } finally {
   restore();
 }
@@ -63,21 +87,22 @@ if (readFileSync(filePath, "utf8") !== original) {
   process.exit(1);
 }
 
-if (result.error?.code === "ETIMEDOUT") {
-  console.log(`TIMEOUT · mutant ${mutantId} · ${found.file}:${start.line}: the command did not finish, nothing can be said about the mutant`);
-  process.exit(4);
+exitIfNotConclusive(mutatedResult, "with the mutant");
+
+if (mutatedResult.status === 0) {
+  console.log(`SURVIVED · ${where} (${found.mutant.mutatorName})`);
+  process.exit(0);
 }
-if (result.error || result.status === null) {
-  console.log(`ERROR · mutant ${mutantId} · ${found.file}:${start.line}: the command could not run (${result.error?.message ?? `signal ${result.signal}`})`);
+
+const baselineResult = run();
+exitIfNotConclusive(baselineResult, "without the mutant");
+if (baselineResult.status !== 0) {
+  console.log(`ERROR · ${where}: the command also fails without the mutant, so its failure says nothing about the mutant`);
+  const baselineSummary = failureSummary(baselineResult);
+  if (baselineSummary) console.log(baselineSummary);
   process.exit(3);
 }
 
-const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
-const summary = output
-  .split("\n")
-  .filter((line) => /✕|●|Tests:|Test Suites:/.test(line))
-  .slice(0, 15)
-  .join("\n");
-
-console.log(`${result.status === 0 ? "SURVIVED" : "KILLED"} · mutant ${mutantId} · ${found.file}:${start.line} (${found.mutant.mutatorName})`);
+console.log(`KILLED · ${where} (${found.mutant.mutatorName})`);
+const summary = failureSummary(mutatedResult);
 if (summary) console.log(summary);

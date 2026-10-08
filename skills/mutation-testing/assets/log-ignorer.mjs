@@ -7,10 +7,21 @@ const MEMBER_TYPES = new Set(["MemberExpression", "OptionalMemberExpression"]);
 
 const escapeRegExp = (text) => text.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
 
-// "this.*logger.*" matches `this.logger.info(...)` and `this.baseLogger.warn(...)`. `*` stands for
-// one name: it never crosses a dot or a call.
-const patternToRegExp = (pattern) =>
-  new RegExp(`^${pattern.split("*").map(escapeRegExp).join("[^.()]*")}$`, "i");
+const literalToRegExp = (text) => text.split("*").map(escapeRegExp).join("[^.()]*");
+
+// "this.*logger.{info,warn}" matches `this.logger.info(...)` and `this.baseLogger.warn(...)`. `*`
+// stands for one name: it never crosses a dot or a call. `{a,b}` is one of the listed names.
+const patternToRegExp = (pattern) => {
+  const source = pattern
+    .split(/(\{[^{}]*\})/)
+    .map((part) =>
+      part.startsWith("{") && part.endsWith("}")
+        ? `(?:${part.slice(1, -1).split(",").map(literalToRegExp).join("|")})`
+        : literalToRegExp(part),
+    )
+    .join("");
+  return new RegExp(`^${source}$`, "i");
+};
 
 const patterns = JSON.parse(readFileSync(new URL("./ignore-calls.json", import.meta.url), "utf8")).map(patternToRegExp);
 

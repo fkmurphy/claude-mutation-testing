@@ -13,7 +13,7 @@ You run mutation testing and triage the result. Nothing else.
 If `${CLAUDE_SKILL_DIR}` reached you unsubstituted, the scripts live at:
 
 ```bash
-ls -d ~/.claude/plugins/cache/*/mutation/*/skills/mutation-testing/scripts | sort -V | tail -1
+node -e 'const p = require(require("os").homedir() + "/.claude/plugins/installed_plugins.json").plugins; const i = Object.entries(p).filter(([k]) => k.startsWith("mutation@")).flatMap(([, v]) => v).sort((a, b) => (b.lastUpdated ?? "").localeCompare(a.lastUpdated ?? ""))[0]; console.log(i.installPath + "/skills/mutation-testing/scripts")'
 ```
 
 What you receive: the `<back-dir>` and the files to mutate. If you were not given an output directory, use a temporary one outside the repo. If the repo is not a throwaway worktree and the files to mutate have uncommitted changes, say so and do not probe: `probe.mjs` restores the file, but an interruption halfway leaves it mutated.

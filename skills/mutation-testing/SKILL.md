@@ -15,14 +15,17 @@ One command does everything: installs Stryker if missing (leaving `package.json`
 ${CLAUDE_SKILL_DIR}/scripts/mutate.sh <back-dir> <out-dir> <file>...
 ```
 
-- `<back-dir>`: the service directory, the one with `package.json` and `jest.config.js`. Ideally inside a throwaway worktree.
+- `<back-dir>`: the service directory, the one with `package.json` and the jest config. Ideally inside a throwaway worktree.
 - `<out-dir>`: outside the repo, e.g. the session scratchpad.
 - `<file>`: paths relative to `<back-dir>`. Code, never tests. Accepts a range to narrow it to what changed: `src/lib/orders/Order.ts:120-180`. In a review, the diff's range.
 - `--typecheck`: discards mutants TypeScript would reject. Slower.
 
-Prints `summary.json` to stdout and leaves it in `<out-dir>`, next to `mutation.json` (the full report, used for probing) and the logs.
+Prints `summary.json` to stdout and leaves it in `<out-dir>`, next to `mutation.json` (the full report, used for probing) and the logs. `summary.json` carries under `config` the effective settings and where each one came from (default, detected or the repo's `.mutation.json`).
 
-If another jest is running on the machine, the script prints `LOAD_WARNING` and `summary.json` carries it in `warnings`: runtimes and timeouts are inflated. Say so in the output.
+Everything in `warnings` goes in the output:
+
+- `LOAD_WARNING`: another jest is running on the machine. Runtimes and timeouts are inflated.
+- `RECHECK_INCONCLUSIVE`: a timeout could not be rechecked (`ERROR` or `TIMEOUT` from the probe). It stays counted as detected, so it may hide a survivor.
 
 | Exit code | Meaning | What to do |
 |---|---|---|
@@ -32,13 +35,13 @@ If another jest is running on the machine, the script prints `LOAD_WARNING` and 
 | 4 | Stryker failed | read the tail of `stryker.log` it prints |
 | 5 | could not install | read `install.log` |
 
-It takes about **2.5 s per mutant** at the default concurrency (4), plus `pnpm install` if the worktree is new. A typical file has 20 to 100 mutants. For many files, say so before running.
+It takes about **2.5 s per mutant** at the default concurrency (4), plus the dependency install if the worktree is new. A typical file has 20 to 100 mutants. For many files, say so before running.
 
 ## Already filtered out
 
 No need to discard these again:
 
-- **Logs.** Calls to `logger.*`, `baseLogger.*`, `getLogger().*` and `.child(...)`, and the statement that contains them. Instrumentation is not business logic.
+- **Logs.** By default, the log-level methods (`info`, `warn`, `error`, `debug`, `trace`, `fatal`, `child`) called on any name ending in `logger` (`logger`, `baseLogger`, `this.logger`, `getLogger()`, `x.child(...)`), plus `console.*`, and the statement that contains them. Instrumentation is not business logic. The repo can add or replace patterns: the effective list is `config.effective.ignoreCalls`. A method that is not a log level (`auditLogger.record(...)`) is mutated.
 - **Static code.** Code that only runs when the module loads (`ignoreStatic`). A chosen blind spot: module-level config is not measured.
 - **Integration.** Nothing is mutated against integration (the script excludes the same test paths the repo's `test-unit` script excludes, or `src/test/integration/` if it has none); each mutant would cost seconds of database. It is used to settle survivors, below.
 - **Timeouts under load.** Stryker counts a timeout as detected, and with several runners in parallel a slow test runs out of time without the mutant having broken it: at concurrency 6, 58 of 67 mutants "died" that way and only 2 of 13 survivors were left. The script reruns each timeout alone, with no load, and the one that passes goes back to the list with `revivedFromTimeout: true`. `Hit limit reached` ones are real infinite loops and stay as detected.
@@ -78,9 +81,20 @@ When reading does not decide, apply the mutant and run something:
 node ${CLAUDE_SKILL_DIR}/scripts/probe.mjs <out-dir>/mutation.json <back-dir> <id> -- <command>
 ```
 
-Applies mutant `<id>`, runs the command and restores the file. Prints `KILLED` or `SURVIVED`.
+Applies mutant `<id>`, runs the command and restores the file. The first word of the output is the verdict:
 
-- **Before declaring a `gap` in a file that has integration tests**, probe with the integration test: `-- pnpm run test src/test/integration/<file>.test.ts`. It needs whatever the integration suite needs locally, usually a database. In the measured reference, one of the two permission-check candidates died here.
+| Verdict | Exit | Meaning |
+|---|---|---|
+| `SURVIVED` | 0 | the command passes with the mutant |
+| `KILLED` | 0 | the command fails with the mutant **and passes without it** (the probe reruns it unmutated to confirm) |
+| `ERROR` | 3 | the command could not run, or **it also fails without the mutant**: a database that is down, a red test. Says nothing about the mutant |
+| `TIMEOUT` | 4 | the command did not finish within `PROBE_TIMEOUT_MS` (default 10 min). Says nothing about the mutant |
+
+Exit 1 means the file could not be restored: stop and restore it with `git checkout`.
+
+`ERROR` and `TIMEOUT` are never a verdict on the survivor. Fix the cause (for example, start the database) and probe again, or leave the survivor `unclear` with the reason.
+
+- **Before declaring a `gap` in a file that has integration tests**, probe with the integration test, through the repo's own script: `-- pnpm run test src/test/integration/<file>.test.ts` (or the `npm`/`yarn` equivalent). It needs whatever the integration suite needs locally, usually a database. In the measured reference, one of the two permission-check candidates died here.
 - **To confirm a `gap`**, the strongest move is writing the test with the distinguishing input in a temporary file and probing with it: if it fails with the mutant and passes without it, the gap is proven. Delete the file afterwards.
 
 ### The central warning
