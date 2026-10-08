@@ -2,7 +2,9 @@
 // Settles a survivor: does integration kill it? is it equivalent?
 //
 // Usage: node probe.mjs <mutation.json> <back-dir> <mutant-id> -- <command> [args...]
-// Output: KILLED if the command fails with the mutant applied, SURVIVED if it passes.
+// Output: KILLED if the command fails with the mutant applied, SURVIVED if it passes. If the
+// command cannot run or runs out of time (PROBE_TIMEOUT_MS, default 10 min) the verdict is ERROR
+// or TIMEOUT, exit 3 or 4: that says nothing about the mutant.
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -50,6 +52,7 @@ try {
     encoding: "utf8",
     env: { ...process.env, TZ: "Etc/UTC" },
     maxBuffer: 64 * 1024 * 1024,
+    timeout: Number(process.env.PROBE_TIMEOUT_MS ?? 10 * 60 * 1000),
   });
 } finally {
   restore();
@@ -58,6 +61,15 @@ try {
 if (readFileSync(filePath, "utf8") !== original) {
   console.error(`WARNING: ${found.file} was not restored`);
   process.exit(1);
+}
+
+if (result.error?.code === "ETIMEDOUT") {
+  console.log(`TIMEOUT · mutant ${mutantId} · ${found.file}:${start.line}: the command did not finish, nothing can be said about the mutant`);
+  process.exit(4);
+}
+if (result.error || result.status === null) {
+  console.log(`ERROR · mutant ${mutantId} · ${found.file}:${start.line}: the command could not run (${result.error?.message ?? `signal ${result.signal}`})`);
+  process.exit(3);
 }
 
 const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;

@@ -13,8 +13,7 @@ You run mutation testing and triage the result. Nothing else.
 If `${CLAUDE_SKILL_DIR}` reached you unsubstituted, the scripts live at:
 
 ```bash
-python3 -c "import json,os;print(json.load(open(os.path.expanduser('~/.claude/plugins/installed_plugins.json')))['plugins']['mutation@fkmurphy'][0]['installPath'])"
-# + /skills/mutation-testing/scripts/
+ls -d ~/.claude/plugins/cache/*/mutation/*/skills/mutation-testing/scripts | sort -V | tail -1
 ```
 
 What you receive: the `<back-dir>` and the files to mutate. If you were not given an output directory, use a temporary one outside the repo. If the repo is not a throwaway worktree and the files to mutate have uncommitted changes, say so and do not probe: `probe.mjs` restores the file, but an interruption halfway leaves it mutated.

@@ -24,6 +24,10 @@ const backDir = path.resolve(backDirArg);
 const ts = createRequire(path.join(backDir, "package.json"))("typescript");
 
 const configPath = ts.findConfigFile(backDir, ts.sys.fileExists, "tsconfig.json");
+if (!configPath) {
+  console.error(`no tsconfig.json found from ${backDir}`);
+  process.exit(2);
+}
 const parsed = ts.parseJsonConfigFileContent(ts.readConfigFile(configPath, ts.sys.readFile).config, ts.sys, path.dirname(configPath));
 const snapshots = new Map();
 const service = ts.createLanguageService(
@@ -165,6 +169,11 @@ specs.forEach((spec) => {
   });
 });
 
+const warnings = [];
+if (!program.getSourceFiles().some((sourceFile) => isTestFile(sourceFile.fileName) && !sourceFile.fileName.includes("node_modules"))) {
+  warnings.push("the TypeScript project has no test files (tsconfig probably excludes them): no test can be found");
+}
+
 const tests = new Map();
 const routes = [];
 const roots = [];
@@ -219,6 +228,7 @@ while (queue.length > 0 && visited.size < MAX_NODES) {
 console.log(
   JSON.stringify(
     {
+      warnings,
       starts: [...starts.values()].map(({ sourceFile, declaration }) => describe(sourceFile, declaration)),
       moduleLevel,
       tests: [...tests.values()],
