@@ -15,23 +15,24 @@ One command does everything: installs Stryker if missing (leaving `package.json`
 ${CLAUDE_SKILL_DIR}/scripts/mutate.sh <back-dir> <out-dir> <file>...
 ```
 
-- `<back-dir>`: the service directory, the one with `package.json` and the jest config. Ideally inside a throwaway worktree.
+- `<back-dir>`: the service directory, the one with `package.json`. Ideally inside a throwaway worktree.
 - `<out-dir>`: outside the repo, e.g. the session scratchpad.
 - `<file>`: paths relative to `<back-dir>`. Code, never tests. Accepts a range to narrow it to what changed: `src/lib/orders/Order.ts:120-180`. In a review, the diff's range.
 - `--typecheck`: discards mutants TypeScript would reject. Slower.
 
-Prints `summary.json` to stdout and leaves it in `<out-dir>`, next to `mutation.json` (the full report, used for probing) and the logs. `summary.json` carries under `config` the effective settings and where each one came from (default, detected or the repo's `.mutation.json`).
+Prints `summary.json` to stdout and leaves it in `<out-dir>`, next to `mutation.json` (the full report, used for probing) and the logs. `summary.json` carries under `config` the effective settings and where each one came from: the repo's unit test script, a default, or the repo's `.mutation.json`. Most come from the unit script (`test-unit`, `test:unit` or `unit`), followed through its `pnpm run`/`npm run`/`yarn` references down to the jest call: its `--testPathIgnorePatterns`, its `--setupFilesAfterEnv`, its `--config` and the variables in front of it (`TZ=UTC jest`). If a value looks wrong, the fix is a `.mutation.json` in `<back-dir>`, not a different command.
 
 Everything in `warnings` goes in the output:
 
 - `LOAD_WARNING`: another jest is running on the machine. Runtimes and timeouts are inflated.
 - `RECHECK_INCONCLUSIVE`: a timeout could not be rechecked (`ERROR` or `TIMEOUT` from the probe). It stays counted as detected, so it may hide a survivor.
+- `BASELINE_WIDENED`: no test is related to the files by imports, usually because the jest `roots` leave the source out, so the precondition ran the whole unit suite. The result is still valid; runs are slower.
 
 | Exit code | Meaning | What to do |
 |---|---|---|
 | 0 | ran | triage |
 | 2 | bad usage | fix the arguments |
-| 3 | **red baseline** | stop. With tests failing unmutated, every mutant counts as killed and the result is noise. Report which tests fail |
+| 3 | **red baseline** | stop. With tests failing unmutated, every mutant counts as killed and the result is noise. Report which tests fail. If they need infrastructure (a database), they are integration tests outside the excluded paths: say so, and that `unitTestIgnorePatterns` in `.mutation.json` keeps them out. Also `NO_TESTS`: the unit suite is empty with this config |
 | 4 | Stryker failed | read the tail of `stryker.log` it prints |
 | 5 | could not install | read `install.log` |
 
@@ -43,7 +44,7 @@ No need to discard these again:
 
 - **Logs.** By default, the log-level methods (`info`, `warn`, `error`, `debug`, `trace`, `fatal`, `child`) called on any name ending in `logger` (`logger`, `baseLogger`, `this.logger`, `getLogger()`, `x.child(...)`), plus `console.*`, and the statement that contains them. Instrumentation is not business logic. The repo can add or replace patterns: the effective list is `config.effective.ignoreCalls`. A method that is not a log level (`auditLogger.record(...)`) is mutated.
 - **Static code.** Code that only runs when the module loads (`ignoreStatic`). A chosen blind spot: module-level config is not measured.
-- **Integration.** Nothing is mutated against integration (the script excludes the same test paths the repo's `test-unit` script excludes, or `src/test/integration/` if it has none); each mutant would cost seconds of database. It is used to settle survivors, below.
+- **Integration.** Nothing is mutated against integration: the script excludes the test paths the unit script excludes (`config.effective.unitTestIgnorePatterns`; without a unit script, `/integration/` and `/e2e/`). Each mutant would cost seconds of database. It is used to settle survivors, below.
 - **Timeouts under load.** Stryker counts a timeout as detected, and with several runners in parallel a slow test runs out of time without the mutant having broken it: at concurrency 6, 58 of 67 mutants "died" that way and only 2 of 13 survivors were left. The script reruns each timeout alone, with no load, and the one that passes goes back to the list with `revivedFromTimeout: true`. `Hit limit reached` ones are real infinite loops and stay as detected.
 
 ## Triage each survivor
@@ -94,7 +95,7 @@ Exit 1 means the file could not be restored: stop and restore it with `git check
 
 `ERROR` and `TIMEOUT` are never a verdict on the survivor. Fix the cause (for example, start the database) and probe again, or leave the survivor `unclear` with the reason.
 
-- **Before declaring a `gap` in a file that has integration tests**, probe with the integration test, through the repo's own script: `-- pnpm run test src/test/integration/<file>.test.ts` (or the `npm`/`yarn` equivalent). It needs whatever the integration suite needs locally, usually a database. In the measured reference, one of the two permission-check candidates died here.
+- **Before declaring a `gap` in a file that has integration tests**, probe with the integration test, through the script the repo uses to run one integration file (read `package.json`), e.g. `-- npm run test:integration -- <path/to/file.test.ts>`. It needs whatever the integration suite needs locally, usually a database. In the measured reference, one of the two permission-check candidates died here.
 - **To confirm a `gap`**, the strongest move is writing the test with the distinguishing input in a temporary file and probing with it: if it fails with the mutant and passes without it, the gap is proven. Delete the file afterwards.
 
 ### The central warning

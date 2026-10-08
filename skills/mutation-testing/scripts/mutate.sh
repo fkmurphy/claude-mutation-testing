@@ -2,7 +2,7 @@
 # Runs Stryker on specific files of a Node/TypeScript service and leaves a reduced result.
 #
 # Usage: mutate.sh <back-dir> <out-dir> [--typecheck] <file> [<file>...]
-#   <back-dir>    the service directory with package.json and a jest config
+#   <back-dir>    the service directory, the one with package.json
 #   <out-dir>     where stryker.log, mutation.json and summary.json end up (outside the repo)
 #   <file>        paths relative to <back-dir>, e.g. src/lib/orders/Order.ts. Accepts a
 #                 line range to narrow it down: src/lib/orders/Order.ts:120-180
@@ -41,11 +41,16 @@ cd "$BACK_DIR" || exit 2
 [ -f package.json ] || fail 2 "$BACK_DIR has no package.json"
 
 node "$SKILL_DIR/scripts/resolve-config.mjs" "$BACK_DIR" > "$OUT_DIR/config.json" || exit 2
-config() { node -p "const c = require('$OUT_DIR/config.json').effective; $1" ; }
+config() { node -p "const c = require(process.argv[1]).effective; $1" "$OUT_DIR/config.json"; }
 PACKAGE_MANAGER="$(config c.packageManager)"
 LOCKFILE="$(config c.lockfile)"
-JEST_CONFIG_FILE="$(config 'c.jestConfigFile ?? ""')"
-node -p "require('$OUT_DIR/config.json').report.map((line) => 'config · ' + line).join('\\n')" >&2
+node -p "require(process.argv[1]).report.map((line) => 'config · ' + line).join('\\n')" "$OUT_DIR/config.json" >&2
+
+# The environment the unit suite runs with (`TZ=UTC jest ...` in its script, or "env" in
+# .mutation.json), for the baseline, Stryker and the rechecks alike.
+while IFS= read -r -d '' assignment; do
+  export "${assignment?}"
+done < <(node -e 'const { env } = require(process.argv[1]).effective; process.stdout.write(Object.entries(env).map(([name, value]) => `${name}=${value}\0`).join(""))' "$OUT_DIR/config.json")
 
 SOURCE_FILES=()
 for spec in "${FILES[@]}"; do
@@ -53,7 +58,7 @@ for spec in "${FILES[@]}"; do
   SOURCE_FILES+=("$file")
   [ -f "$file" ] || fail 2 "$file does not exist (paths are relative to $BACK_DIR)"
   case "$file" in
-    *.test.*|*.spec.*|*/__tests__/*|__tests__/*|src/test/*) fail 2 "$file is a test: mutate the code, not the test" ;;
+    *.test.*|*.spec.*|__tests__/*|*/__tests__/*|test/*|*/test/*|tests/*|*/tests/*) fail 2 "$file is a test: mutate the code, not the test" ;;
   esac
 done
 
@@ -127,30 +132,31 @@ fi
 # The config lives inside the repo because Stryker copies the project into a sandbox and jest
 # has to find it there, through relative paths.
 mkdir -p "$WORK_DIR"
-cp "$SKILL_DIR/assets/log-ignorer.mjs" "$WORK_DIR/"
+cp "$SKILL_DIR/assets/log-ignorer.mjs" "$SKILL_DIR/assets/call-patterns.mjs" "$SKILL_DIR/assets/load-jest-config.cjs" "$WORK_DIR/"
 config 'JSON.stringify(c.ignoreCalls)' > "$WORK_DIR/ignore-calls.json"
 
-if [ -n "$JEST_CONFIG_FILE" ]; then
-  JEST_BASE="require(\"../$JEST_CONFIG_FILE\")"
-else
-  JEST_BASE="require(\"../package.json\").jest"
-fi
+JEST_CONFIG="$(config 'JSON.stringify(c.jestConfig)')"
 SETUP_AFTER_ENV="$(config 'JSON.stringify(c.setupFilesAfterEnv)')"
 UNIT_IGNORES="$(config 'JSON.stringify(c.unitTestIgnorePatterns)')"
 
+# Paths are resolved from where this file is loaded: inside Stryker's sandbox they point to the
+# sandbox copy, so the setup files import the mutated code and not the original.
 cat > "$WORK_DIR/jest.config.cjs" <<JS
 const path = require("node:path");
-const base = $JEST_BASE;
+const loadJestConfig = require("./load-jest-config.cjs");
 
-module.exports = {
-  ...base,
-  rootDir: path.resolve(__dirname, ".."),
-  setupFilesAfterEnv: [...(base.setupFilesAfterEnv ?? []), ...${SETUP_AFTER_ENV}],
-  testPathIgnorePatterns: [...(base.testPathIgnorePatterns ?? ["/node_modules/"]), ...${UNIT_IGNORES}],
+const backDir = path.resolve(__dirname, "..");
+const toPath = (file) => (file.startsWith("<rootDir>") ? file : path.resolve(backDir, file));
+
+module.exports = async () => {
+  const base = await loadJestConfig(backDir, ${JEST_CONFIG});
+  return {
+    ...base,
+    setupFilesAfterEnv: [...(base.setupFilesAfterEnv ?? []), ...${SETUP_AFTER_ENV}.map(toPath)],
+    testPathIgnorePatterns: [...(base.testPathIgnorePatterns ?? ["/node_modules/"]), ...${UNIT_IGNORES}],
+  };
 };
 JS
-
-export TZ=Etc/UTC
 
 # Precondition: the suite covering these files passes unmutated. With a red or flaky
 # baseline, every mutant counts as killed and the result is noise.
@@ -162,13 +168,26 @@ if [ -n "$OTHER_JEST" ]; then
   echo "LOAD_WARNING: another jest is running (pids $OTHER_JEST). Timeouts and runtime will be inflated." | tee -a "$OUT_DIR/warnings.txt" >&2
 fi
 
+red_baseline() {
+  echo "RED_BASELINE: $1 Nothing Stryker says is valid." >&2
+  grep -E "✕|●|Tests:" "$2" | head -30 >&2
+  exit 3
+}
+run_baseline() {
+  node_modules/.bin/jest -c "$WORK_DIR/jest.config.cjs" --passWithNoTests --silent "$@" >"$OUT_DIR/baseline.log" 2>&1
+}
+
 echo "baseline of the related tests..." >&2
 BASELINE_START=$(date +%s)
-if ! node_modules/.bin/jest -c "$WORK_DIR/jest.config.cjs" --findRelatedTests "${SOURCE_FILES[@]}" \
-    --passWithNoTests --silent >"$OUT_DIR/baseline.log" 2>&1; then
-  echo "RED_BASELINE: the related tests fail without any mutation. Nothing Stryker says is valid." >&2
-  grep -E "✕|●|Tests:" "$OUT_DIR/baseline.log" | head -30 >&2
-  exit 3
+run_baseline --findRelatedTests "${SOURCE_FILES[@]}" || red_baseline "the related tests fail without any mutation." "$OUT_DIR/baseline.log"
+# --findRelatedTests only sees source files inside the jest roots. When it finds nothing, an empty
+# baseline would pass without proving anything: the whole unit suite, which Stryker's initial
+# run executes anyway, is the precondition instead.
+if grep -q "No tests found" "$OUT_DIR/baseline.log"; then
+  echo "BASELINE_WIDENED: no test is related to the files by imports (are they outside the jest roots?): the baseline ran the whole unit suite." \
+    | tee -a "$OUT_DIR/warnings.txt" >&2
+  run_baseline || red_baseline "the unit suite fails without any mutation." "$OUT_DIR/baseline.log"
+  grep -q "No tests found" "$OUT_DIR/baseline.log" && fail 3 "NO_TESTS: the unit suite has no tests with this config (see $OUT_DIR/baseline.log)"
 fi
 BASELINE_SECONDS=$(( $(date +%s) - BASELINE_START ))
 
@@ -204,6 +223,9 @@ JS
 echo "running Stryker on ${#FILES[@]} file(s)..." >&2
 START=$(date +%s)
 if ! node_modules/.bin/stryker run "$WORK_DIR/stryker.config.json" >"$OUT_DIR/stryker.log" 2>&1; then
+  if grep -q "There were failed tests in the initial test run" "$OUT_DIR/stryker.log"; then
+    red_baseline "Stryker's initial run, which executes the whole unit suite, has failing tests." "$OUT_DIR/stryker.log"
+  fi
   echo "Stryker failed. Last lines of $OUT_DIR/stryker.log:" >&2
   tail -25 "$OUT_DIR/stryker.log" >&2
   exit 4

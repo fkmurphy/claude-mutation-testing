@@ -49,7 +49,6 @@ const run = () =>
   spawnSync(command[0], command.slice(1), {
     cwd: backDir,
     encoding: "utf8",
-    env: { ...process.env, TZ: "Etc/UTC" },
     maxBuffer: 64 * 1024 * 1024,
     timeout: Number(process.env.PROBE_TIMEOUT_MS ?? 10 * 60 * 1000),
   });
