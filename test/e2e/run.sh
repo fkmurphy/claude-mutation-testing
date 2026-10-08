@@ -92,6 +92,15 @@ process.exit(failed ? 1 : 0);
 JS
 rm "$WORK/project/.mutation.json"
 
+echo "# integration stage, no database configured"
+mkdir -p "$FIXTURE_DBS/fixture"
+status=0
+"$MUTATE" "$WORK/project" "$WORK/out-int-default" --integration src/discount.js > "$WORK/summary-int-default.json" 2> "$WORK/stderr-int-default.log" || status=$?
+rm -rf "$FIXTURE_DBS/fixture"
+check "exit code is 0" "[ $status -eq 0 ]"
+check "it runs one runner on the default database" "grep -q '1 runner on the default database' '$WORK/stderr-int-default.log'"
+check "the gap still dies in integration" "node -e 'process.exit(require(process.argv[1]).summary.integration.killed === 1 ? 0 : 1)' '$WORK/summary-int-default.json'"
+
 echo "# red baseline"
 sed -i.bak 's/toBe(80)/toBe(81)/' "$WORK/project/test/unit/discount.test.js"
 status=0

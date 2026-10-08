@@ -162,7 +162,10 @@ const strykerConfig = {
 };
 writeFileSync(path.join(workDir, "stryker.integration.json"), JSON.stringify(strykerConfig, null, 2));
 
-log(`integration stage: running Stryker on ${ranges.length} position(s) with ${integration.concurrency} shard(s), ${selectedTests.length} test file(s) selected...`);
+const runners = integration.database
+  ? `${integration.concurrency} shard(s), one database each`
+  : "1 runner on the default database (no integration.database)";
+log(`integration stage: running Stryker on ${ranges.length} position(s) with ${runners}, ${selectedTests.length} test file(s) selected...`);
 const strykerStart = Date.now();
 const stryker = run(path.join(backDir, "node_modules/.bin/stryker"), ["run", path.join(workDir, "stryker.integration.json")], {
   logFile: path.join(stageDir, "stryker.log"),

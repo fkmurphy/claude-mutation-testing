@@ -31,6 +31,9 @@ version per batch: whatever is not published yet accumulates under `## Unrelease
 - **`affected-tests.mjs` follows CommonJS.** `module.exports = { fn }` and `exports.fn = …`
   are followed to the `require()` that destructures them; the TypeScript language service does not
   link those. It is no longer marked experimental: the integration stage depends on it.
+- **Without `integration.database` the stage still runs**, on one runner against the database the
+  app uses by default, and the log says so instead of calling it a shard. The skill's description
+  no longer says it mutates against unit tests only.
 - **The jest config of a stage is built from a JSON of settings** (`assets/jest-config.cjs`),
   shared by both stages instead of generated as text.
 

@@ -1,6 +1,6 @@
 ---
 name: mutation-testing
-description: Checks whether the tests of a Node/TypeScript service actually protect the code, by running Stryker on specific files and triaging the survivors until only real gaps are left. Use when the user says "validate the tests with mutation", "do these tests protect anything?", "run Stryker", "mutation testing on X", "check whether the tests are tautological", or their Spanish equivalents ("validá los tests por mutación", "¿estos tests protegen algo?", "corré Stryker"), or when a review needs to claim that a code path has no safety net. Unit tests only; integration is used to settle survivors, not to mutate.
+description: Checks whether the tests of a Node/TypeScript service actually protect the code, by running Stryker on specific files and triaging the survivors until only real gaps are left. Use when the user says "validate the tests with mutation", "do these tests protect anything?", "run Stryker", "mutation testing on X", "check whether the tests are tautological", or their Spanish equivalents ("validá los tests por mutación", "¿estos tests protegen algo?", "corré Stryker"), or when a review needs to claim that a code path has no safety net. Mutates against the unit tests; with --integration, what survives is mutated again against the integration tests that reach it, one database per runner.
 ---
 
 # Mutation testing
