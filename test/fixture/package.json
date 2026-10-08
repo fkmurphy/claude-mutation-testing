@@ -4,9 +4,10 @@
   "scripts": {
     "test-runner": "TZ=UTC jest",
     "test-unit": "npm run test-runner -- --testPathIgnorePatterns=/integration/",
-    "test-integration": "npm run test-runner -- test/integration"
+    "test-integration": "npm run test-runner -- --runInBand --testMatch=\"**/test/integration/**/*.test.js\""
   },
   "devDependencies": {
-    "jest": "29.7.0"
+    "jest": "29.7.0",
+    "typescript": "5.9.3"
   }
 }

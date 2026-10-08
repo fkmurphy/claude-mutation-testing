@@ -21,7 +21,7 @@ exposes it, and one line explaining every survivor that was discarded.
 | Agent `mutant-triager` | Runs the script first, triages every survivor, probes what reading does not settle, returns only the result |
 | `scripts/mutate.sh` | Runs everything: config, Stryker install if missing, baseline, Stryker, timeout rechecks, reduced report |
 | `scripts/probe.mjs` | Applies one mutant, runs any command (an integration test, a temporary test) and restores the file |
-| `scripts/affected-tests.mjs` | **Experimental, not used by the agent yet.** Finds the tests that reach some lines without running anything |
+| `scripts/affected-tests.mjs` | Finds the tests that reach some lines without running anything: TypeScript references, Express and tsoa routes, CommonJS `require`. Picks the tests of the integration stage |
 
 ## Install
 
@@ -79,6 +79,11 @@ The result looks like this (from the fixture in `test/fixture`):
    from the mutant? Verdicts: `gap`, `bug` (the mutant behaves better), `equivalent`,
    `killed-by-integration`, `noise`, `unclear`. What reading does not settle gets probed.
 
+8. **Integration stage**, with `--integration`. What the unit stage left alive (survivors and
+   uncovered mutants) is mutated again at exactly those positions, against the integration tests
+   that reach their lines. Every Stryker runner is a **shard** with its own database, so tests that
+   clean tables never wipe each other's data. See below.
+
 `probe.mjs` counts a kill only when the command fails with the mutant **and passes without it**.
 A probe against a database that is down fails both ways, and it reports `ERROR`. It never reports
 `KILLED` in that case.
@@ -130,6 +135,61 @@ own value. Editors validate it with the bundled schema:
 | `concurrency`, `maxTestRunnerReuse` | 4 and 20, measured on a real service; also `MUTATE_CONCURRENCY` and `MUTATE_REUSE` |
 | `packageManager` | the closest lockfile up to the repo root, then the `packageManager` field of `package.json`, then npm |
 
+## Integration stage
+
+```bash
+mutate.sh <back-dir> <out-dir> --integration src/orders/discount.ts:120-180
+```
+
+The unit stage is fast and runs every mutant. The integration stage only gets what the unit
+stage left alive, usually a handful of mutants, so the database is paid for a few of them and not
+for hundreds:
+
+1. `affected-tests.mjs` finds the tests that reach the surviving lines, and of those, the ones
+   the integration script's `--testMatch` calls integration tests.
+2. One database per runner (a shard) is created from the template with the repo's own command,
+   and dropped at the end if `drop` is set.
+3. Each Stryker runner claims a free shard through a lock file and points the app at it, by
+   setting the variable named in `database.env` before any test module loads.
+4. The baseline of those tests runs unmutated first. If it fails, the stage is skipped with a
+   warning and the unit result stands.
+5. Stryker mutates exactly the surviving positions. Timeouts are rechecked with no load, as in the
+   unit stage.
+
+The result keeps the unit stage's numbers and adds `killedByIntegration` (each with the test that
+killed it), `integration.status` on every remaining survivor, and `scoreWithIntegration`.
+
+The integration suite is read from its script, the first of `test-integration`,
+`test:integration` and `integration`, like the unit one. Only the database needs configuring.
+For a Postgres in a local container:
+
+```json
+{
+  "integration": {
+    "concurrency": 2,
+    "database": {
+      "env": "DB_NAME",
+      "template": "app_test",
+      "prepare": "docker exec postgres psql -U app -d postgres -v ON_ERROR_STOP=1 -c \"DROP DATABASE IF EXISTS \\\"$MUTATION_DB\\\"\" -c \"CREATE DATABASE \\\"$MUTATION_DB\\\" TEMPLATE \\\"$MUTATION_DB_TEMPLATE\\\"\"",
+      "drop": "docker exec postgres psql -U app -d postgres -c \"DROP DATABASE IF EXISTS \\\"$MUTATION_DB\\\"\""
+    }
+  }
+}
+```
+
+`prepare` and `drop` are shell commands run from the service directory with `MUTATION_DB` (the
+shard's name, `<template>_mutation_<n>`) and `MUTATION_DB_TEMPLATE` set. A Postgres template
+cannot have open connections while it is copied, so nothing else should be using the test database
+during the run.
+
+| `integration` key | Default |
+|---|---|
+| `testScript` | the first of `test-integration`, `test:integration`, `integration` |
+| `testMatch`, `setupFilesAfterEnv`, `env` | from the integration script |
+| `concurrency` | 2 shards with a database; 1 runner without one |
+| `database.env`, `database.template`, `database.prepare` | required for shards |
+| `database.drop` | none: the shard databases are kept and recreated by `prepare` next time |
+
 ## Exit codes and warnings
 
 | `mutate.sh` exit | Meaning |
@@ -144,20 +204,25 @@ own value. Editors validate it with the bundled schema:
 |---|---|
 | `LOAD_WARNING` | another jest was running on the machine: runtimes and timeouts are inflated |
 | `RECHECK_INCONCLUSIVE` | a timeout could not be rechecked and stays counted as a kill |
+| `INTEGRATION_SKIPPED`, `INTEGRATION_NO_TESTS`, `INTEGRATION_BASELINE_RED`, `INTEGRATION_FAILED` | the integration stage did not run or did not finish; the message says why, and the unit result stands |
+| `SELECTOR_INCOMPLETE` | the static walk that picks the integration tests stopped somewhere; tests behind that point did not run |
 | `BASELINE_WIDENED` | no test is related to the files by imports (often jest `roots` that leave the source out), so the baseline ran the whole unit suite |
 
 ## Limitations
 
-- **Unit tests only.** Integration tests settle survivors through `probe.mjs` but are not run per
-  mutant: with a shared database, parallel runners would wipe each other's data.
+- **The integration stage needs the repo to say how to copy its test database**
+  (`integration.database`). Without it the stage still runs, on a single runner: correct, slow.
+- **The test selection is static.** Where the walk stops (a method shared by many classes, a queue
+  worker, a reference at module level) the tests behind it do not run, and the run says so
+  (`SELECTOR_INCOMPLETE`).
 - **Equivalent mutants cannot be marked.** Stryker forgets them between runs. The agent explains
   each one in one line, so a second run is reading, not thinking.
 - **Mutation does not see a badly designed algorithm.** It perturbs the code that was written.
   About a quarter of real faults couple to no mutant at all (Just et al., FSE 2014).
-- **Slow on widely imported files.** Per mutant, Stryker's jest runner loads every test that
-  imports the mutated file. On a file imported by app-level tests most mutants time out, and only
-  the recheck gives the right answer. Handing Stryker the tests from `affected-tests.mjs` is the
-  planned fix.
+- **The unit stage is slow on widely imported files.** Per mutant, Stryker's jest runner loads
+  every unit test that imports the mutated file. On a file imported by app-level tests most
+  mutants time out, and only the recheck gives the right answer. The integration stage does not
+  have this problem: it hands Stryker the selected tests.
 - A jest config with `projects` is loaded, but the plugin's ignore patterns and setup files reach
   only the top level.
 

@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +11,7 @@ const REDUCE = fileURLToPath(new URL("../../skills/mutation-testing/scripts/redu
 const at = (line) => ({ start: { line, column: 1 }, end: { line, column: 2 } });
 const mutant = (id, status, line, extra = {}) => ({ id, status, mutatorName: "Test", replacement: "x", location: at(line), coveredBy: ["t1"], ...extra });
 
-const reduce = ({ mutants, recheck = "", warnings = "", config }) => {
+const reduce = ({ mutants, recheck = "", warnings = "", config, integration }) => {
   const root = mkdtempSync(path.join(tmpdir(), "mutation-reduce-"));
   const report = {
     files: { "src/a.js": { source: "a\nb\nc\nd\ne\n", mutants } },
@@ -24,6 +24,22 @@ const reduce = ({ mutants, recheck = "", warnings = "", config }) => {
   if (config) {
     writeFileSync(path.join(root, "config.json"), JSON.stringify(config));
     args.push(path.join(root, "config.json"));
+  }
+  if (integration) {
+    const stageDir = path.join(root, "integration");
+    mkdirSync(stageDir);
+    const stageReport = {
+      files: { "src/a.js": { source: "a\nb\nc\nd\ne\n", mutants: integration.mutants } },
+      testFiles: { "test/it/a.test.js": { tests: [{ id: "i1", name: "stores a" }] } },
+    };
+    writeFileSync(path.join(stageDir, "mutation.json"), JSON.stringify(stageReport));
+    writeFileSync(path.join(stageDir, "targets.json"), JSON.stringify(integration.mutants));
+    writeFileSync(path.join(stageDir, "recheck.tsv"), integration.recheck ?? "");
+    if (!config) {
+      writeFileSync(path.join(root, "config.json"), "{}");
+      args.push(path.join(root, "config.json"));
+    }
+    args.push(stageDir);
   }
   const result = spawnSync("node", args, { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
@@ -72,5 +88,40 @@ describe("reduce.mjs", () => {
     const result = reduce({ mutants: [], warnings: "LOAD_WARNING: x\n", config: { effective: { concurrency: 4 }, sources: { concurrency: "default" } } });
     assert.deepEqual(result.warnings, ["LOAD_WARNING: x"]);
     assert.deepEqual(result.config, { effective: { concurrency: 4 }, sources: { concurrency: "default" } });
+  });
+});
+
+describe("reduce.mjs with the integration stage", () => {
+  // Stage ids differ from the unit stage's: the position and the change identify the mutant.
+  const unit = [mutant("1", "Survived", 1), mutant("2", "Survived", 2), mutant("3", "NoCoverage", 3), mutant("4", "NoCoverage", 4)];
+  const stage = [
+    mutant("a", "Killed", 1, { killedBy: ["i1"] }),
+    mutant("b", "Survived", 2, { coveredBy: ["i1"] }),
+    mutant("c", "Survived", 3, { coveredBy: ["i1"] }),
+    mutant("d", "NoCoverage", 4),
+  ];
+  const result = reduce({ mutants: unit, integration: { mutants: stage } });
+
+  it("moves what integration kills out of the survivors, with the test that killed it", () => {
+    assert.deepEqual(
+      result.killedByIntegration.map(({ id, unitStatus, killedBy }) => [id, unitStatus, killedBy]),
+      [["1", "Survived", ["test/it/a.test.js › stores a"]]],
+    );
+  });
+
+  it("keeps what survives both stages, and adds what only integration covers and does not kill", () => {
+    assert.deepEqual(
+      result.survivors.map(({ id, integration, unitStatus }) => [id, integration.status, unitStatus ?? null]),
+      [
+        ["2", "Survived", null],
+        ["3", "Survived", "NoCoverage"],
+      ],
+    );
+  });
+
+  it("leaves in noCoverage only what neither stage covers, and scores both stages", () => {
+    assert.deepEqual(result.noCoverage, [{ file: "src/a.js", count: 1, lines: [4] }]);
+    assert.deepEqual(result.summary.integration, { ran: true, targets: 4, killed: 1, survived: 2 });
+    assert.equal(result.summary.scoreWithIntegration, 25);
   });
 });

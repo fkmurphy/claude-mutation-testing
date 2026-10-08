@@ -5,7 +5,30 @@ version per batch: whatever is not published yet accumulates under `## Unrelease
 
 ## Unreleased
 
-—
+- **Integration stage, with one database per runner.** `mutate.sh --integration` takes what the
+  unit stage left alive (survivors and NoCoverage), mutates exactly those positions again with
+  Stryker's line:column ranges, and runs the integration tests that `affected-tests.mjs` finds for
+  their lines. Every runner is a shard: it claims a database of its own through a lock file and
+  points the app at it before any test loads. The result adds `killedByIntegration` with the test
+  that killed each mutant, and `integration.status` on what is left. Why: settling survivors
+  against integration used to be a probe per survivor by hand, and running integration per
+  mutant on one shared database gives false kills. Measured on the fixture with two runners on
+  one database: the equivalent mutants came out killed by the other runner's data; with shards,
+  only the real gap died.
+- **Only the survivors go to integration.** Per mutant, Stryker's jest runner loads every test
+  related by imports, and an HTTP integration test imports the whole app. Only the survivors,
+  with selected tests, keep the database cost to a handful of mutants.
+- **`affected-tests.mjs` follows middlewares.** `router.use(guard)` reaches every route of that
+  router, and a tsoa `@Middlewares([guard])` reaches the decorated method or every method of the
+  decorated class. A router mounting a middleware is no longer read as mounted inside itself,
+  which repeated its prefix. Measured on a real authorization middleware reached only over HTTP:
+  before, the walk stopped at three module-level references and found no test; now it finds the
+  two integration tests that call those routes, with no cut.
+- **`affected-tests.mjs` follows CommonJS.** `module.exports = { fn }` and `exports.fn = …`
+  are followed to the `require()` that destructures them; the TypeScript language service does not
+  link those. It is no longer marked experimental: the integration stage depends on it.
+- **The jest config of a stage is built from a JSON of settings** (`assets/jest-config.cjs`),
+  shared by both stages instead of generated as text.
 
 ## 0.3.0
 

@@ -13,6 +13,11 @@ trap 'rm -rf "$WORK"' EXIT
 check() { if eval "$2"; then echo "ok   - $1"; else echo "FAIL - $1"; FAILED=1; fi; }
 FAILED=0
 
+# The fixture's stand-in database server; its default database must not exist, so the integration
+# test fails if the unit stage ever lets it in.
+FIXTURE_DBS="${TMPDIR:-/tmp}/mutation-fixture-db"
+rm -rf "$FIXTURE_DBS/fixture"
+
 cp -R "$REPO_DIR/test/fixture" "$WORK/project"
 (cd "$WORK/project" && npm install --no-audit --no-fund --loglevel=error >/dev/null)
 (cd "$WORK/project" && shasum package.json package-lock.json) > "$WORK/before.sums"
@@ -48,6 +53,44 @@ Object.entries(checks).forEach(([label, passed]) => {
 if (!expected.every((item) => found.includes(item))) console.log(`  survivors: ${JSON.stringify(found)}`);
 process.exit(failed ? 1 : 0);
 JS
+
+echo "# integration stage, two shards"
+cat > "$WORK/project/.mutation.json" <<'JSON'
+{
+  "integration": {
+    "concurrency": 2,
+    "database": {
+      "env": "FIXTURE_DB",
+      "template": "fixture",
+      "prepare": "node -e 'require(\"fs\").mkdirSync(require(\"path\").join(require(\"os\").tmpdir(), \"mutation-fixture-db\", process.env.MUTATION_DB), { recursive: true })'",
+      "drop": "node -e 'require(\"fs\").rmSync(require(\"path\").join(require(\"os\").tmpdir(), \"mutation-fixture-db\", process.env.MUTATION_DB), { recursive: true, force: true })'"
+    }
+  }
+}
+JSON
+status=0
+"$MUTATE" "$WORK/project" "$WORK/out-int" --integration src/discount.js > "$WORK/summary-int.json" 2> "$WORK/stderr-int.log" || status=$?
+check "exit code is 0" "[ $status -eq 0 ]"
+check "each runner claimed its own shard" "[ \"\$(cut -f1 '$WORK/out-int/integration/shard-locks/claims.log' | sort -u | wc -l | tr -d ' ')\" -eq 2 ]"
+check "the shard databases are dropped" "[ ! -e '$FIXTURE_DBS/fixture_mutation_0' ] && [ ! -e '$FIXTURE_DBS/fixture_mutation_1' ]"
+node - "$WORK/summary-int.json" <<'JS' || FAILED=1
+const summary = require(process.argv[2]);
+const survivors = summary.survivors.map(({ line, mutator, integration }) => `${line} ${mutator} ${integration?.status}`).sort();
+const killed = summary.killedByIntegration.map(({ line, mutator, killedBy }) => `${line} ${mutator} ${killedBy[0]}`);
+const checks = {
+  "the gap the unit stage leaves is killed by the integration test": JSON.stringify(killed) === JSON.stringify(["12 MethodExpression test/integration/discount.test.js › is false when one stored customer is inactive"]),
+  "the equivalents survive both stages": JSON.stringify(survivors) === JSON.stringify(["11 ConditionalExpression Survived", "5 EqualityOperator NoCoverage"]),
+  "the summary counts the stage": summary.summary.integration?.ran === true && summary.summary.integration.killed === 1,
+};
+let failed = false;
+Object.entries(checks).forEach(([label, passed]) => {
+  console.log(`${passed ? "ok  " : "FAIL"} - ${label}`);
+  if (!passed) failed = true;
+});
+if (failed) console.log(`  survivors: ${JSON.stringify(survivors)}\n  killed: ${JSON.stringify(killed)}`);
+process.exit(failed ? 1 : 0);
+JS
+rm "$WORK/project/.mutation.json"
 
 echo "# red baseline"
 sed -i.bak 's/toBe(80)/toBe(81)/' "$WORK/project/test/unit/discount.test.js"

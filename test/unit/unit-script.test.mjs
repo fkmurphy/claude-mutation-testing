@@ -48,6 +48,10 @@ describe("findJestInvocation", () => {
 });
 
 describe("readJestFlags", () => {
+  it("reads --testMatch for the integration suite", () => {
+    assert.deepEqual(readJestFlags(["--testMatch=**/it/**/*.test.ts", "--i"]).testMatch, ["**/it/**/*.test.ts"]);
+  });
+
   it("reads both flag forms, kebab-case and repeated flags, without duplicates", () => {
     const flags = readJestFlags([
       "--testPathIgnorePatterns=/a/",
@@ -61,6 +65,11 @@ describe("readJestFlags", () => {
       "-c",
       "jest.unit.js",
     ]);
-    assert.deepEqual(flags, { testPathIgnorePatterns: ["/a/", "/b/", "/c/"], setupFilesAfterEnv: ["./setup.ts"], config: "jest.unit.js" });
+    assert.deepEqual(flags, {
+      testPathIgnorePatterns: ["/a/", "/b/", "/c/"],
+      setupFilesAfterEnv: ["./setup.ts"],
+      testMatch: [],
+      config: "jest.unit.js",
+    });
   });
 });

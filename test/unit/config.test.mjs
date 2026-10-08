@@ -98,7 +98,7 @@ describe("validation", () => {
   const rejects = (files, message, env) => assert.throws(() => resolve(files, ".", env), (error) => error instanceof ConfigError && message.test(error.message));
 
   it("rejects unknown keys, wrong types and inherited names", () => {
-    rejects({ "package.json": {}, ".mutation.json": { setupFiles: [] } }, /unknown keys: setupFiles/);
+    rejects({ "package.json": {}, ".mutation.json": { setupFiles: [] } }, /unknown key: setupFiles/);
     rejects({ "package.json": {}, ".mutation.json": { concurrency: 0 } }, /"concurrency" must be a positive integer/);
     rejects({ "package.json": {}, ".mutation.json": { packageManager: "constructor" } }, /"packageManager" must be one of/);
     rejects({ "package.json": {}, ".mutation.json": { env: { TZ: 1 } } }, /"env" must be an object of string values/);
@@ -122,6 +122,41 @@ describe("validation", () => {
 
   it("fails without a package.json", () => {
     rejects({}, /has no package.json/);
+  });
+});
+
+describe("integration", () => {
+  const scripts = {
+    "test-runner": "TZ=Etc/UTC jest --setupFilesAfterEnv='./src/test/setup.ts'",
+    "test-integration": "pnpm run test-runner --i --setupFilesAfterEnv='./src/test/integration/setup.ts' --testMatch='**/src/test/integration/**/*.test.ts'",
+  };
+  const database = { env: "DB_NAME", template: "app_test", prepare: "createdb -T \"$MUTATION_DB_TEMPLATE\" \"$MUTATION_DB\"" };
+
+  it("derives the integration suite from its script", () => {
+    const { effective } = resolve({ "package.json": { scripts } });
+    assert.deepEqual(effective.integration, {
+      testScript: "test-integration",
+      testMatch: ["**/src/test/integration/**/*.test.ts"],
+      setupFilesAfterEnv: ["./src/test/setup.ts", "./src/test/integration/setup.ts"],
+      env: { TZ: "Etc/UTC" },
+      concurrency: 1,
+      database: null,
+    });
+  });
+
+  it("runs one shard per runner only with a database to give each", () => {
+    assert.equal(resolve({ "package.json": { scripts }, ".mutation.json": { integration: { database } } }).effective.integration.concurrency, 2);
+    const configured = resolve({ "package.json": { scripts }, ".mutation.json": { integration: { database, concurrency: 3 } } });
+    assert.equal(configured.effective.integration.concurrency, 3);
+  });
+
+  it("validates the nested sections", () => {
+    const rejects = (integration, message) =>
+      assert.throws(() => resolve({ "package.json": { scripts }, ".mutation.json": { integration } }), (error) => message.test(error.message));
+    rejects({ shards: 2 }, /unknown key: integration.shards/);
+    rejects({ database: { env: "DB_NAME", template: "app_test" } }, /"integration.database.prepare" is required/);
+    rejects({ database: { ...database, env: "" } }, /"integration.database.env" must be/);
+    rejects({ testScript: "nope" }, /integration.testScript "nope" is not a script/);
   });
 });
 
